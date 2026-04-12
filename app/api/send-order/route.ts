@@ -1,0 +1,167 @@
+import { NextRequest, NextResponse } from "next/server";
+import { Resend } from "resend";
+import { getServiceClient } from "@/lib/supabase-service";
+import { escapeHtml } from "@/lib/html-escape";
+import { formatCurrency } from "@/lib/utils";
+
+export async function POST(req: NextRequest) {
+  try {
+    const formData = await req.formData();
+
+    const payloadStr = formData.get("payload") as string;
+    if (!payloadStr) {
+      return NextResponse.json({ error: "Missing payload" }, { status: 400 });
+    }
+
+    const payload = JSON.parse(payloadStr);
+
+    // Collect files
+    const fileAttachments: { filename: string; content: string; contentType: string }[] = [];
+    formData.forEach((value, key) => {
+      if (key.startsWith("file_") && value instanceof File) {
+        // We'll handle files as base64
+        fileAttachments.push({
+          filename: value.name,
+          content: "", // filled below
+          contentType: value.type || "application/octet-stream",
+        });
+      }
+    });
+
+    // Re-iterate to get file contents (can't use for..of on FormData)
+    const filePromises: Promise<void>[] = [];
+    let fileIdx = 0;
+    formData.forEach((value, key) => {
+      if (key.startsWith("file_") && value instanceof File) {
+        const idx = fileIdx++;
+        const file = value as File;
+        filePromises.push(
+          file.arrayBuffer().then(buf => {
+            fileAttachments[idx].content = Buffer.from(buf).toString("base64");
+            fileAttachments[idx].filename = file.name;
+            fileAttachments[idx].contentType = file.type || "application/octet-stream";
+          })
+        );
+      }
+    });
+    await Promise.all(filePromises);
+
+    // 1. Save to Supabase
+    const supabase = getServiceClient();
+    let orderId: string | null = null;
+    if (supabase) {
+      const { data, error } = await supabase
+        .from("orders")
+        .insert({ payload })
+        .select("id")
+        .single();
+      if (!error && data) orderId = data.id;
+    } else {
+      console.log("[send-order] Supabase not configured, skipping DB save");
+      console.log("[send-order] Payload:", JSON.stringify(payload, null, 2));
+    }
+
+    // 2. Send email via Resend
+    const resendKey = process.env.RESEND_API_KEY;
+    const orderEmail = process.env.ORDER_EMAIL || "edoardo.modini@tamas.it";
+    const fromEmail = process.env.RESEND_FROM_EMAIL || "STAMPOO DTF <onboarding@resend.dev>";
+
+    if (resendKey) {
+      const resend = new Resend(resendKey);
+
+      const subjectsRows = payload.subjects
+        .map((s: any, i: number) => {
+          const sr = payload.quote?.subjects?.[i];
+          return `
+            <tr>
+              <td style="padding:6px 10px;border-bottom:1px solid #eee;">${escapeHtml(s.name)}</td>
+              <td style="padding:6px 10px;border-bottom:1px solid #eee;">${s.width} &times; ${s.height} cm</td>
+              <td style="padding:6px 10px;border-bottom:1px solid #eee;">${s.quantity} pz</td>
+              <td style="padding:6px 10px;border-bottom:1px solid #eee;">${sr ? formatCurrency(sr.pricePerPiece) : "-"}</td>
+              <td style="padding:6px 10px;border-bottom:1px solid #eee;">${sr ? formatCurrency(sr.totalPrice) : "-"}</td>
+            </tr>`;
+        })
+        .join("");
+
+      const html = `
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>Nuovo ordine DTF</title></head>
+<body style="font-family:Arial,sans-serif;color:#333;max-width:700px;margin:0 auto;padding:20px;">
+  <h1 style="color:#1a1a2e;border-bottom:3px solid #3B82F6;padding-bottom:10px;">
+    Nuovo ordine DTF &mdash; STAMPOO
+  </h1>
+
+  <h2 style="margin-top:24px;">Dati ordine</h2>
+  <table style="width:100%;border-collapse:collapse;">
+    <tr><td style="padding:4px 0;font-weight:bold;width:160px;">Azienda:</td><td>${escapeHtml(payload.companyName)}</td></tr>
+    ${payload.clientName ? `<tr><td style="padding:4px 0;font-weight:bold;">Cliente:</td><td>${escapeHtml(payload.clientName)}</td></tr>` : ""}
+    ${payload.clientCode ? `<tr><td style="padding:4px 0;font-weight:bold;">Codice cliente:</td><td>${escapeHtml(payload.clientCode)}</td></tr>` : ""}
+    <tr><td style="padding:4px 0;font-weight:bold;">Fornitura:</td><td>${payload.includeCut ? "Pezzi pre-tagliati" : "Rullo intero"}</td></tr>
+    <tr><td style="padding:4px 0;font-weight:bold;">Spedizione:</td><td>${payload.includeShipping ? (payload.isIslands ? "S&igrave; (Isole)" : "S&igrave;") : "No (ritiro in sede)"}</td></tr>
+    <tr><td style="padding:4px 0;font-weight:bold;">Prezzo/m:</td><td>${formatCurrency(payload.quote?.pricePerMeter ?? 0)}/m</td></tr>
+    <tr><td style="padding:4px 0;font-weight:bold;">Metri totali:</td><td>${(payload.quote?.totalRollMeters ?? 0).toFixed(2)} m</td></tr>
+  </table>
+
+  <h2 style="margin-top:24px;">Soggetti</h2>
+  <table style="width:100%;border-collapse:collapse;border:1px solid #ddd;">
+    <thead>
+      <tr style="background:#f0f4ff;">
+        <th style="padding:8px 10px;text-align:left;">Soggetto</th>
+        <th style="padding:8px 10px;text-align:left;">Dimensioni</th>
+        <th style="padding:8px 10px;text-align:left;">Quantit&agrave;</th>
+        <th style="padding:8px 10px;text-align:left;">Prezzo/pz</th>
+        <th style="padding:8px 10px;text-align:left;">Totale</th>
+      </tr>
+    </thead>
+    <tbody>${subjectsRows}</tbody>
+  </table>
+
+  <h2 style="margin-top:24px;">Riepilogo economico</h2>
+  <table style="width:100%;border-collapse:collapse;">
+    <tr><td style="padding:4px 0;">Totale stampa:</td><td style="text-align:right;font-weight:bold;">${formatCurrency(payload.quote?.totalPrintPrice ?? 0)}</td></tr>
+    ${payload.includeCut ? `<tr><td style="padding:4px 0;">Taglio pezzi:</td><td style="text-align:right;">${formatCurrency(payload.quote?.cutPrice ?? 0)}</td></tr>` : ""}
+    ${payload.includeShipping ? `<tr><td style="padding:4px 0;">Spedizione:</td><td style="text-align:right;">${payload.quote?.shippingPrice === 0 ? "Gratuita" : formatCurrency(payload.quote?.shippingPrice ?? 0)}</td></tr>` : ""}
+    <tr style="border-top:2px solid #333;">
+      <td style="padding:8px 0;font-size:18px;font-weight:bold;">TOTALE ORDINE:</td>
+      <td style="text-align:right;font-size:18px;font-weight:bold;color:#3B82F6;">${formatCurrency(payload.quote?.grandTotal ?? 0)}</td>
+    </tr>
+  </table>
+
+  <p style="margin-top:24px;font-size:13px;color:#666;">
+    File grafici allegati: ${payload.files?.length ?? 0}<br>
+    ID ordine: ${orderId ?? "non salvato"}<br>
+    Data: ${new Date(payload.createdAt).toLocaleString("it-IT")}
+  </p>
+
+  <hr style="margin-top:30px;border:none;border-top:1px solid #eee;">
+  <p style="font-size:12px;color:#999;">
+    STAMPOO &mdash; TAMAS SRL &mdash; Via Arzignano 10, 36070 Trissino (VI) &mdash; Tel. 0445 491417
+  </p>
+</body>
+</html>`;
+
+      const attachments = fileAttachments
+        .filter(f => f.content.length > 0)
+        .map(f => ({
+          filename: f.filename,
+          content: f.content,
+        }));
+
+      await resend.emails.send({
+        from: fromEmail,
+        to: [orderEmail],
+        subject: `Nuovo ordine DTF - ${escapeHtml(payload.companyName)} - ${formatCurrency(payload.quote?.grandTotal ?? 0)}`,
+        html,
+        attachments,
+      });
+    } else {
+      console.log("[send-order] Resend not configured, skipping email");
+    }
+
+    return NextResponse.json({ success: true, orderId });
+  } catch (err: any) {
+    console.error("[send-order] Error:", err);
+    return NextResponse.json({ error: err?.message ?? "Unknown error" }, { status: 500 });
+  }
+}

@@ -1,12 +1,11 @@
 "use client";
 
-import React, { useState, useRef, useCallback, useEffect } from "react";
+import React, { useState, useRef, useCallback } from "react";
 import { calculateNesting } from "@/lib/nesting";
 import type { NestingResult, SubjectInput, ClientPricing } from "@/lib/nesting";
 import { formatCurrency, getSubjectName, getSubjectColor } from "@/lib/utils";
 import { extractProportions } from "@/lib/extract-proportions";
 import type { FileProportions } from "@/lib/extract-proportions";
-import type { QuoteRow } from "@/lib/quotes";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -22,16 +21,13 @@ interface SubjectForm {
   extracting: boolean;
 }
 
-// Step 4 has two variants: order confirmed, or quote saved
-type Step = 1 | 2 | 3 | "saved" | "confirmed";
+type Step = 1 | 2 | 3 | "confirmed";
 
 interface Props {
   clientCode?: string;
   clientName?: string;
   pricing: ClientPricing;
-  // When coming from ClientArea ("Converti in ordine")
-  preloadedQuote?: QuoteRow;
-  onBackToArea?: () => void;
+  onLogout?: () => void;
 }
 
 const ACCEPTED_FORMATS = ".pdf,.ai,.eps,.svg,.png,.jpg,.jpeg,.tif,.tiff,.psd,.cdr";
@@ -43,18 +39,6 @@ function emptySubject(index: number): SubjectForm {
   return {
     name: getSubjectName(index),
     width: "", height: "", quantity: "",
-    file: null,
-    ratio: null, lockRatio: false,
-    proportionSource: null, extracting: false,
-  };
-}
-
-function subjectFromInput(inp: SubjectInput, i: number): SubjectForm {
-  return {
-    name: inp.name,
-    width: String(inp.width),
-    height: String(inp.height),
-    quantity: String(inp.quantity),
     file: null,
     ratio: null, lockRatio: false,
     proportionSource: null, extracting: false,
@@ -98,28 +82,16 @@ function LockIcon({ locked }: { locked: boolean }) {
 
 // ─── Main Component ──────────────────────────────────────────────────────────
 
-export default function QuotingApp({ clientCode, clientName, pricing, preloadedQuote, onBackToArea }: Props) {
-  // If preloadedQuote is set, we start at step 2 with all data pre-filled
-  const isConverting = !!preloadedQuote;
-
-  const [step, setStep] = useState<Step>(isConverting ? 2 : 1);
-  const [subjects, setSubjects] = useState<SubjectForm[]>(() => {
-    if (preloadedQuote) {
-      return preloadedQuote.payload.subjects.map((inp, i) => subjectFromInput(inp, i));
-    }
-    return [emptySubject(0)];
-  });
-  const [includeCut, setIncludeCut] = useState(preloadedQuote?.payload.includeCut ?? false);
-  const [includeShipping, setIncludeShipping] = useState(preloadedQuote?.payload.includeShipping ?? true);
-  const [isIslands, setIsIslands] = useState(preloadedQuote?.payload.isIslands ?? false);
-  const [quote, setQuote] = useState<NestingResult | null>(preloadedQuote?.payload.quote ?? null);
+export default function QuotingApp({ clientCode, clientName, pricing, onLogout }: Props) {
+  const [step, setStep] = useState<Step>(1);
+  const [subjects, setSubjects] = useState<SubjectForm[]>([emptySubject(0)]);
+  const [includeCut, setIncludeCut] = useState(false);
+  const [includeShipping, setIncludeShipping] = useState(true);
+  const [isIslands, setIsIslands] = useState(false);
+  const [quote, setQuote] = useState<NestingResult | null>(null);
   const [companyName, setCompanyName] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
-  const [savingQuote, setSavingQuote] = useState(false);
-  const [savedQuoteId, setSavedQuoteId] = useState<string | null>(null);
-  // ID of preloaded quote to mark as 'ordered' when sending
-  const [preloadedQuoteId] = useState<string | null>(preloadedQuote?.id ?? null);
 
   const fileInputRefs = useRef<(HTMLInputElement | null)[]>([]);
 
@@ -224,46 +196,18 @@ export default function QuotingApp({ clientCode, clientName, pricing, preloadedQ
   const handleShippingChange = (val: boolean) => { setIncludeShipping(val); recalculate(includeCut, val, isIslands); };
   const handleIslandsChange = (val: boolean) => { setIsIslands(val); recalculate(includeCut, includeShipping, val); };
 
-  const allFilesUploaded = subjects.every(s => s.file !== null);
-
-  // ── Save as quote (draft) ────────────────────────────────────────────────
-
-  const handleSaveQuote = async () => {
-    if (!clientCode || !quote) return;
-    setSavingQuote(true);
-    setError(null);
-    try {
-      const payload = {
-        clientCode,
-        clientName: clientName ?? null,
-        pricing,
-        subjects: subjects.map(s => ({ name: s.name, width: parseFloat(s.width), height: parseFloat(s.height), quantity: parseInt(s.quantity) })),
-        quote,
-        includeCut,
-        includeShipping,
-        isIslands,
-        createdAt: new Date().toISOString(),
-      };
-      const res = await fetch("/api/save-quote", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error ?? "Errore");
-      setSavedQuoteId(data.id);
-      setStep("saved");
-    } catch (err: any) {
-      setError(err.message ?? "Errore nel salvataggio");
-    } finally {
-      setSavingQuote(false);
-    }
-  };
-
   // ── Send order ───────────────────────────────────────────────────────────
 
   const handleSendOrder = async () => {
     if (!companyName.trim()) { setError("Inserisci il nome dell'azienda"); return; }
+
+    // Check all files are uploaded
+    const missingFiles = subjects.filter(s => !s.file).map(s => s.name);
+    if (missingFiles.length > 0) {
+      setError(`File grafici mancanti per: ${missingFiles.join(", ")}. Carica tutti i file prima di inviare l'ordine.`);
+      return;
+    }
+
     setSubmitting(true);
     setError(null);
     try {
@@ -288,15 +232,6 @@ export default function QuotingApp({ clientCode, clientName, pricing, preloadedQ
       const res = await fetch("/api/send-order", { method: "POST", body: formData });
       if (!res.ok) { const d = await res.json(); throw new Error(d.error ?? "Errore nell'invio"); }
 
-      // If this was a preloaded quote (converting draft → order), mark it as ordered
-      if (preloadedQuoteId) {
-        await fetch("/api/quotes", {
-          method: "PATCH",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ id: preloadedQuoteId, status: "ordered" }),
-        }).catch(() => {}); // non-blocking
-      }
-
       setStep("confirmed");
     } catch (err: any) {
       setError(err.message ?? "Errore nell'invio dell'ordine");
@@ -314,7 +249,6 @@ export default function QuotingApp({ clientCode, clientName, pricing, preloadedQ
     setQuote(null);
     setCompanyName("");
     setError(null);
-    setSavedQuoteId(null);
   };
 
   // ── Progress bar helpers ─────────────────────────────────────────────────
@@ -338,10 +272,16 @@ export default function QuotingApp({ clientCode, clientName, pricing, preloadedQ
                 {pricing.type === "fixed" ? `Prezzo riservato: ${formatCurrency(pricing.value)}/m` : `Sconto riservato: -${pricing.value}%`}
               </span>
             )}
-            {clientCode && (
-              <a href={`/${clientCode}/area`} className="text-sm text-blue-600 hover:underline hidden sm:block">
-                I miei preventivi →
-              </a>
+            {clientName && (
+              <span className="text-sm text-gray-600 hidden sm:block">{clientName}</span>
+            )}
+            {onLogout && (
+              <button
+                onClick={onLogout}
+                className="text-sm text-gray-500 hover:text-gray-700 border border-gray-300 px-3 py-1.5 rounded-lg hover:bg-gray-50 transition-colors"
+              >
+                Esci
+              </button>
             )}
           </div>
         </div>
@@ -388,10 +328,10 @@ export default function QuotingApp({ clientCode, clientName, pricing, preloadedQ
                         <span className="font-semibold text-gray-800">{s.name}</span>
                         {s.extracting && <span className="text-xs text-blue-500 animate-pulse">Lettura file…</span>}
                         {!s.extracting && s.proportionSource === "absolute" && (
-                          <span className="text-xs text-green-600 bg-green-50 border border-green-200 px-1.5 py-0.5 rounded">📐 Dimensioni rilevate dal file</span>
+                          <span className="text-xs text-green-600 bg-green-50 border border-green-200 px-1.5 py-0.5 rounded">Dimensioni rilevate dal file</span>
                         )}
                         {!s.extracting && s.proportionSource === "proportional" && (
-                          <span className="text-xs text-blue-600 bg-blue-50 border border-blue-200 px-1.5 py-0.5 rounded">📐 Proporzioni rilevate</span>
+                          <span className="text-xs text-blue-600 bg-blue-50 border border-blue-200 px-1.5 py-0.5 rounded">Proporzioni rilevate</span>
                         )}
                       </div>
                       {subjects.length > 1 && (
@@ -450,18 +390,6 @@ export default function QuotingApp({ clientCode, clientName, pricing, preloadedQ
         {/* ── STEP 2 ─────────────────────────────────────────────────────── */}
         {step === 2 && quote && (
           <div className="space-y-4">
-            {/* Banner: converting from saved quote */}
-            {isConverting && (
-              <div className="bg-blue-50 border border-blue-200 rounded-lg px-4 py-3 flex items-center justify-between">
-                <p className="text-sm text-blue-700">
-                  <strong>Conversione preventivo in ordine.</strong> Carica i file grafici e procedi.
-                </p>
-                {onBackToArea && (
-                  <button onClick={onBackToArea} className="text-xs text-blue-600 hover:underline ml-4 whitespace-nowrap">← Torna all'area</button>
-                )}
-              </div>
-            )}
-
             {/* Options */}
             <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
               <h2 className="text-lg font-semibold text-gray-900 mb-4">Opzioni fornitura</h2>
@@ -548,31 +476,17 @@ export default function QuotingApp({ clientCode, clientName, pricing, preloadedQ
 
             {/* Action buttons */}
             <div className="flex flex-col sm:flex-row gap-3">
-              {/* Back */}
               <button
-                onClick={() => isConverting && onBackToArea ? onBackToArea() : setStep(1)}
+                onClick={() => setStep(1)}
                 className="sm:flex-1 bg-gray-100 hover:bg-gray-200 text-gray-700 font-semibold py-3 px-5 rounded-xl transition-colors"
               >
-                {isConverting ? "← Torna all'area" : "← Modifica soggetti"}
+                Modifica soggetti
               </button>
-
-              {/* Save as quote — only for identified clients, not when converting */}
-              {clientCode && !isConverting && (
-                <button
-                  onClick={handleSaveQuote}
-                  disabled={savingQuote}
-                  className="sm:flex-1 bg-amber-500 hover:bg-amber-600 text-white font-semibold py-3 px-5 rounded-xl transition-colors shadow disabled:opacity-50"
-                >
-                  {savingQuote ? "Salvataggio…" : "💾 Salva preventivo"}
-                </button>
-              )}
-
-              {/* Confirm order — always enabled */}
               <button
                 onClick={() => { setError(null); setStep(3); }}
                 className="sm:flex-1 bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 px-5 rounded-xl transition-colors shadow"
               >
-                {isConverting ? "Procedi all'ordine →" : "Conferma ordine →"}
+                Conferma ordine →
               </button>
             </div>
           </div>
@@ -589,11 +503,12 @@ export default function QuotingApp({ clientCode, clientName, pricing, preloadedQ
                 </label>
                 <input type="text" value={companyName} onChange={e => setCompanyName(e.target.value)} placeholder="Inserisci il nome della tua azienda" className="w-full border border-gray-300 rounded-lg px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
               </div>
-              {/* File uploads — optional here */}
+              {/* File uploads — required */}
               <div>
-                <p className="text-sm font-medium text-gray-700 mb-2">
-                  File grafici <span className="text-gray-400 font-normal">(opzionali — puoi inviarli per email dopo l'ordine)</span>
+                <p className="text-sm font-medium text-gray-700 mb-1">
+                  File grafici <span className="text-red-500">*</span>
                 </p>
+                <p className="text-xs text-gray-500 mb-3">Carica un file per ogni soggetto. Obbligatorio per procedere.</p>
                 <div className="space-y-2">
                   {subjects.map((s, i) => (
                     <div key={i} className="flex items-center gap-3">
@@ -601,15 +516,12 @@ export default function QuotingApp({ clientCode, clientName, pricing, preloadedQ
                       <span className="text-sm text-gray-700 w-24 truncate">{s.name}</span>
                       <input type="file" accept={ACCEPTED_FORMATS} ref={el => { fileInputRefs.current[i] = el; }} onChange={e => handleFileChange(i, e)} className="hidden" />
                       <button type="button" onClick={() => fileInputRefs.current[i]?.click()}
-                        className={`text-sm px-3 py-1.5 rounded-lg border transition-colors ${s.file ? "border-green-400 bg-green-50 text-green-700" : "border-gray-300 bg-white text-gray-500 hover:border-gray-400"}`}>
-                        {s.file ? `✓ ${s.file.name}` : "Carica file…"}
+                        className={`text-sm px-3 py-1.5 rounded-lg border transition-colors ${s.file ? "border-green-400 bg-green-50 text-green-700" : "border-red-300 bg-red-50 text-red-500 hover:border-red-400"}`}>
+                        {s.file ? `✓ ${s.file.name}` : "Carica file… (obbligatorio)"}
                       </button>
                     </div>
                   ))}
                 </div>
-                {!allFilesUploaded && (
-                  <p className="mt-2 text-xs text-gray-400">Se non carichi i file ora, riceverai una email con le istruzioni per inviarli separatamente.</p>
-                )}
               </div>
             </div>
             <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
@@ -651,33 +563,12 @@ export default function QuotingApp({ clientCode, clientName, pricing, preloadedQ
             </div>
             <div className="flex gap-3">
               <button onClick={() => setStep(2)} className="flex-1 bg-gray-100 hover:bg-gray-200 text-gray-700 font-semibold py-3 px-6 rounded-xl transition-colors">Torna al preventivo</button>
-              <button onClick={handleSendOrder} disabled={submitting} className="flex-2 bg-green-600 hover:bg-green-700 text-white font-semibold py-3 px-8 rounded-xl transition-colors shadow disabled:opacity-50">
-                {submitting ? "Invio in corso…" : "Invia ordine"}
-              </button>
-            </div>
-          </div>
-        )}
-
-        {/* ── STEP: SAVED ─────────────────────────────────────────────────── */}
-        {step === "saved" && (
-          <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-10 text-center">
-            <div className="w-16 h-16 bg-amber-100 rounded-full flex items-center justify-center mx-auto mb-4">
-              <span className="text-3xl">💾</span>
-            </div>
-            <h2 className="text-2xl font-bold text-gray-900 mb-2">Preventivo salvato!</h2>
-            <p className="text-gray-600 mb-6">
-              Il preventivo è stato salvato nella tua area personale.<br />
-              Potrai confermarlo come ordine in qualsiasi momento.
-            </p>
-            <div className="flex flex-col sm:flex-row gap-3 justify-center">
-              <a
-                href={`/${clientCode}/area`}
-                className="bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 px-6 rounded-xl transition-colors shadow"
+              <button
+                onClick={handleSendOrder}
+                disabled={submitting}
+                className="flex-2 bg-green-600 hover:bg-green-700 text-white font-semibold py-3 px-8 rounded-xl transition-colors shadow disabled:opacity-50"
               >
-                Vai all'area preventivi →
-              </a>
-              <button onClick={handleNewQuote} className="bg-gray-100 hover:bg-gray-200 text-gray-700 font-semibold py-3 px-6 rounded-xl transition-colors">
-                Nuovo preventivo
+                {submitting ? "Invio in corso…" : "Invia ordine"}
               </button>
             </div>
           </div>
@@ -697,16 +588,9 @@ export default function QuotingApp({ clientCode, clientName, pricing, preloadedQ
               <p>Via Arzignano 10, 36070 Trissino (VI)</p>
               <p>Tel. 0445 491417</p>
             </div>
-            <div className="flex flex-col sm:flex-row gap-3 justify-center">
-              {clientCode && (
-                <a href={`/${clientCode}/area`} className="bg-gray-100 hover:bg-gray-200 text-gray-700 font-semibold py-3 px-6 rounded-xl transition-colors">
-                  Area preventivi
-                </a>
-              )}
-              <button onClick={handleNewQuote} className="bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 px-8 rounded-xl transition-colors shadow">
-                Nuovo preventivo
-              </button>
-            </div>
+            <button onClick={handleNewQuote} className="bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 px-8 rounded-xl transition-colors shadow">
+              Nuovo preventivo
+            </button>
           </div>
         )}
       </main>

@@ -17,7 +17,18 @@ interface ClientRow {
   email: string | null;
   pricing_type: "standard" | "fixed" | "discount";
   pricing_value: number;
+  username: string | null;
   created_at: string;
+}
+
+interface EditClientForm {
+  id: string;
+  name: string;
+  email: string;
+  pricing_type: ClientRow["pricing_type"];
+  pricing_value: string;
+  username: string;
+  password: string;
 }
 
 interface OrderRow {
@@ -44,9 +55,12 @@ export default function AdminPage() {
   // Clients
   const [clients, setClients] = useState<ClientRow[]>([]);
   const [clientsLoading, setClientsLoading] = useState(false);
-  const [newClient, setNewClient] = useState({ name: "", email: "", pricing_type: "standard" as ClientRow["pricing_type"], pricing_value: "" });
+  const [newClient, setNewClient] = useState({ name: "", email: "", pricing_type: "standard" as ClientRow["pricing_type"], pricing_value: "", username: "", password: "" });
   const [clientError, setClientError] = useState("");
   const [clientSuccess, setClientSuccess] = useState("");
+  const [editClient, setEditClient] = useState<EditClientForm | null>(null);
+  const [editError, setEditError] = useState("");
+  const [editSaving, setEditSaving] = useState(false);
 
   // Preview
   const [previewJson, setPreviewJson] = useState(`[
@@ -112,6 +126,9 @@ export default function AdminPage() {
       return;
     }
 
+    if (!newClient.username.trim()) { setClientError("Username obbligatorio"); return; }
+    if (!newClient.password.trim()) { setClientError("Password obbligatoria"); return; }
+
     try {
       const res = await fetch("/api/clients", {
         method: "POST",
@@ -122,15 +139,61 @@ export default function AdminPage() {
           email: newClient.email.trim() || null,
           pricing_type: newClient.pricing_type,
           pricing_value,
+          username: newClient.username.trim(),
+          password: newClient.password,
         }),
       });
       const data = await res.json();
       if (!res.ok) { setClientError(data.error ?? "Errore"); return; }
       setClientSuccess("Cliente aggiunto con successo");
-      setNewClient({ name: "", email: "", pricing_type: "standard", pricing_value: "" });
+      setNewClient({ name: "", email: "", pricing_type: "standard", pricing_value: "", username: "", password: "" });
       loadClients();
     } catch (err: any) {
       setClientError(err.message);
+    }
+  };
+
+  const handleEditClient = (c: ClientRow) => {
+    setEditClient({
+      id: c.id,
+      name: c.name,
+      email: c.email ?? "",
+      pricing_type: c.pricing_type,
+      pricing_value: c.pricing_value !== 0 ? String(c.pricing_value) : "",
+      username: c.username ?? "",
+      password: "",
+    });
+    setEditError("");
+  };
+
+  const handleSaveEdit = async () => {
+    if (!editClient) return;
+    setEditError("");
+    setEditSaving(true);
+    try {
+      const body: Record<string, any> = {
+        id: editClient.id,
+        name: editClient.name.trim(),
+        email: editClient.email.trim() || null,
+        pricing_type: editClient.pricing_type,
+        pricing_value: editClient.pricing_type !== "standard" ? parseFloat(editClient.pricing_value) : 0,
+        username: editClient.username.trim(),
+      };
+      if (editClient.password) body.password = editClient.password;
+
+      const res = await fetch("/api/clients", {
+        method: "PATCH",
+        headers: { "content-type": "application/json", "x-admin-password": password },
+        body: JSON.stringify(body),
+      });
+      const data = await res.json();
+      if (!res.ok) { setEditError(data.error ?? "Errore"); return; }
+      setEditClient(null);
+      loadClients();
+    } catch (err: any) {
+      setEditError(err.message);
+    } finally {
+      setEditSaving(false);
     }
   };
 
@@ -138,12 +201,6 @@ export default function AdminPage() {
     if (!confirm("Eliminare questo cliente?")) return;
     await fetch(`/api/clients?id=${id}`, { method: "DELETE", headers: { "x-admin-password": password } });
     loadClients();
-  };
-
-  const copyLink = (code: string) => {
-    const url = `${window.location.origin}/${code}`;
-    navigator.clipboard.writeText(url);
-    alert(`Link copiato: ${url}`);
   };
 
   // ── Preview ─────────────────────────────────────────────────────────────
@@ -389,6 +446,28 @@ export default function AdminPage() {
                     />
                   </div>
                 )}
+                <div>
+                  <label className="block text-xs font-medium text-gray-600 mb-1">Username *</label>
+                  <input
+                    type="text"
+                    value={newClient.username}
+                    onChange={e => setNewClient(p => ({ ...p, username: e.target.value }))}
+                    className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    placeholder="Es. mariorossi"
+                    autoComplete="off"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-gray-600 mb-1">Password *</label>
+                  <input
+                    type="password"
+                    value={newClient.password}
+                    onChange={e => setNewClient(p => ({ ...p, password: e.target.value }))}
+                    className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    placeholder="Password accesso cliente"
+                    autoComplete="new-password"
+                  />
+                </div>
 
                 {clientError && <p className="col-span-2 text-red-500 text-sm">{clientError}</p>}
                 {clientSuccess && <p className="col-span-2 text-green-600 text-sm">{clientSuccess}</p>}
@@ -418,39 +497,99 @@ export default function AdminPage() {
                       <tr>
                         <th className="text-left px-4 py-3">Azienda</th>
                         <th className="text-left px-4 py-3">Email</th>
+                        <th className="text-left px-4 py-3">Username</th>
                         <th className="text-left px-4 py-3">Pricing</th>
-                        <th className="text-left px-4 py-3">Codice</th>
                         <th className="text-center px-4 py-3">Azioni</th>
                       </tr>
                     </thead>
                     <tbody>
                       {clients.map(c => (
-                        <tr key={c.id} className="border-t border-gray-100 hover:bg-gray-50">
-                          <td className="px-4 py-3 font-medium">{c.name}</td>
-                          <td className="px-4 py-3 text-gray-500">{c.email ?? "—"}</td>
-                          <td className="px-4 py-3">
-                            {c.pricing_type === "standard" && <span className="text-gray-500">Standard</span>}
-                            {c.pricing_type === "fixed" && <span className="text-blue-600 font-medium">Fisso {formatCurrency(c.pricing_value)}/m</span>}
-                            {c.pricing_type === "discount" && <span className="text-green-600 font-medium">-{c.pricing_value}%</span>}
-                          </td>
-                          <td className="px-4 py-3 font-mono text-xs bg-gray-50">{c.code}</td>
-                          <td className="px-4 py-3 text-center">
-                            <div className="flex items-center justify-center gap-2">
-                              <button
-                                onClick={() => copyLink(c.code)}
-                                className="text-xs bg-blue-50 text-blue-600 px-2 py-1 rounded hover:bg-blue-100"
-                              >
-                                Copia link
-                              </button>
-                              <button
-                                onClick={() => handleDeleteClient(c.id)}
-                                className="text-xs bg-red-50 text-red-500 px-2 py-1 rounded hover:bg-red-100"
-                              >
-                                Elimina
-                              </button>
-                            </div>
-                          </td>
-                        </tr>
+                        <React.Fragment key={c.id}>
+                          <tr className="border-t border-gray-100 hover:bg-gray-50">
+                            <td className="px-4 py-3 font-medium">{c.name}</td>
+                            <td className="px-4 py-3 text-gray-500">{c.email ?? "—"}</td>
+                            <td className="px-4 py-3 font-mono text-xs">{c.username ?? "—"}</td>
+                            <td className="px-4 py-3">
+                              {c.pricing_type === "standard" && <span className="text-gray-500">Standard</span>}
+                              {c.pricing_type === "fixed" && <span className="text-blue-600 font-medium">Fisso {formatCurrency(c.pricing_value)}/m</span>}
+                              {c.pricing_type === "discount" && <span className="text-green-600 font-medium">-{c.pricing_value}%</span>}
+                            </td>
+                            <td className="px-4 py-3 text-center">
+                              <div className="flex items-center justify-center gap-2">
+                                <button
+                                  onClick={() => handleEditClient(c)}
+                                  className="text-xs bg-blue-50 text-blue-600 px-2 py-1 rounded hover:bg-blue-100"
+                                >
+                                  Modifica
+                                </button>
+                                <button
+                                  onClick={() => handleDeleteClient(c.id)}
+                                  className="text-xs bg-red-50 text-red-500 px-2 py-1 rounded hover:bg-red-100"
+                                >
+                                  Elimina
+                                </button>
+                              </div>
+                            </td>
+                          </tr>
+                          {editClient?.id === c.id && (
+                            <tr className="border-t border-blue-100 bg-blue-50">
+                              <td colSpan={5} className="px-4 py-4">
+                                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-3">
+                                  <div>
+                                    <label className="block text-xs font-medium text-gray-600 mb-1">Nome azienda</label>
+                                    <input type="text" value={editClient.name} onChange={e => setEditClient(p => p ? { ...p, name: e.target.value } : p)}
+                                      className="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                                  </div>
+                                  <div>
+                                    <label className="block text-xs font-medium text-gray-600 mb-1">Email</label>
+                                    <input type="email" value={editClient.email} onChange={e => setEditClient(p => p ? { ...p, email: e.target.value } : p)}
+                                      className="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                                  </div>
+                                  <div>
+                                    <label className="block text-xs font-medium text-gray-600 mb-1">Tipo pricing</label>
+                                    <select value={editClient.pricing_type} onChange={e => setEditClient(p => p ? { ...p, pricing_type: e.target.value as ClientRow["pricing_type"] } : p)}
+                                      className="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                                      <option value="standard">Standard</option>
+                                      <option value="fixed">Prezzo fisso</option>
+                                      <option value="discount">Sconto %</option>
+                                    </select>
+                                  </div>
+                                  {editClient.pricing_type !== "standard" && (
+                                    <div>
+                                      <label className="block text-xs font-medium text-gray-600 mb-1">
+                                        {editClient.pricing_type === "fixed" ? "Prezzo fisso (€/m)" : "Sconto (%)"}
+                                      </label>
+                                      <input type="number" min="0" step="0.01" value={editClient.pricing_value}
+                                        onChange={e => setEditClient(p => p ? { ...p, pricing_value: e.target.value } : p)}
+                                        className="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                                    </div>
+                                  )}
+                                  <div>
+                                    <label className="block text-xs font-medium text-gray-600 mb-1">Username</label>
+                                    <input type="text" value={editClient.username} onChange={e => setEditClient(p => p ? { ...p, username: e.target.value } : p)}
+                                      className="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" autoComplete="off" />
+                                  </div>
+                                  <div>
+                                    <label className="block text-xs font-medium text-gray-600 mb-1">Nuova password <span className="text-gray-400">(lascia vuoto per non cambiare)</span></label>
+                                    <input type="password" value={editClient.password} onChange={e => setEditClient(p => p ? { ...p, password: e.target.value } : p)}
+                                      className="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" autoComplete="new-password" placeholder="Nuova password…" />
+                                  </div>
+                                </div>
+                                {editError && <p className="text-red-500 text-sm mb-2">{editError}</p>}
+                                <div className="flex gap-2">
+                                  <button onClick={handleSaveEdit} disabled={editSaving}
+                                    className="bg-blue-600 text-white text-xs font-semibold px-4 py-1.5 rounded-lg hover:bg-blue-700 disabled:opacity-50 transition-colors">
+                                    {editSaving ? "Salvataggio…" : "Salva"}
+                                  </button>
+                                  <button onClick={() => setEditClient(null)}
+                                    className="bg-gray-100 text-gray-700 text-xs font-semibold px-4 py-1.5 rounded-lg hover:bg-gray-200 transition-colors">
+                                    Annulla
+                                  </button>
+                                </div>
+                              </td>
+                            </tr>
+                          )}
+                        </React.Fragment>
                       ))}
                     </tbody>
                   </table>

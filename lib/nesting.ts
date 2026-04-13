@@ -285,12 +285,10 @@ export function calculateNesting(
     bestResult = { rollLengthCm, subjectLengthsCm, colAssignments, oriented };
   }
 
-  // Convert cm to meters, apply minimum, then round up to nearest 0.5m if > 1m
+  // Convert cm to meters, apply minimum, then always round up to nearest 0.5m
   const rawMeters = bestResult.rollLengthCm / 100;
   const clampedMeters = Math.max(MIN_ROLL_METERS, rawMeters);
-  const totalRollMeters = clampedMeters > 1.0
-    ? Math.ceil(clampedMeters / 0.5) * 0.5
-    : clampedMeters;
+  const totalRollMeters = Math.ceil(clampedMeters / 0.5) * 0.5;
 
   const pricePerMeter = getPricePerMeter(totalRollMeters, pricing);
   const totalArea = bestResult.subjectLengthsCm.reduce((a, b) => a + b, 0);

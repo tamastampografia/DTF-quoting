@@ -1,9 +1,11 @@
 "use client";
 
 import React, { useState, useRef, useCallback } from "react";
-import { calculateNesting, STANDARD_TIERS } from "@/lib/nesting";
+import { calculateNesting } from "@/lib/nesting";
 import type { NestingResult, SubjectInput, ClientPricing } from "@/lib/nesting";
 import { formatCurrency, getSubjectName, getSubjectColor } from "@/lib/utils";
+import { extractProportions } from "@/lib/extract-proportions";
+import type { FileProportions } from "@/lib/extract-proportions";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -13,6 +15,11 @@ interface SubjectForm {
   height: string;
   quantity: string;
   file: File | null;
+  // proportion tracking
+  ratio: number | null;           // width/height from file
+  lockRatio: boolean;             // is the lock currently active?
+  proportionSource: FileProportions["source"] | null;
+  extracting: boolean;            // async extraction in progress
 }
 
 type Step = 1 | 2 | 3 | 4;
@@ -26,10 +33,20 @@ interface Props {
 const ACCEPTED_FORMATS = ".pdf,.ai,.eps,.svg,.png,.jpg,.jpeg,.tif,.tiff,.psd,.cdr";
 const MAX_FILE_SIZE_MB = 20;
 
-// ─── Helper ───────────────────────────────────────────────────────────────────
+// ─── Helpers ──────────────────────────────────────────────────────────────────
 
 function emptySubject(index: number): SubjectForm {
-  return { name: getSubjectName(index), width: "", height: "", quantity: "", file: null };
+  return {
+    name: getSubjectName(index),
+    width: "", height: "", quantity: "",
+    file: null,
+    ratio: null, lockRatio: false,
+    proportionSource: null, extracting: false,
+  };
+}
+
+function round1(n: number): string {
+  return (Math.round(n * 10) / 10).toString();
 }
 
 function validateSubjects(subjects: SubjectForm[]): string | null {
@@ -43,6 +60,26 @@ function validateSubjects(subjects: SubjectForm[]): string | null {
     if (w > 57 || h > 57) return `${s.name}: dimensione massima 57 cm`;
   }
   return null;
+}
+
+// ─── Lock icon ────────────────────────────────────────────────────────────────
+
+function LockIcon({ locked }: { locked: boolean }) {
+  return locked ? (
+    // Closed lock
+    <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24"
+      fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
+      <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+    </svg>
+  ) : (
+    // Open lock
+    <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24"
+      fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
+      <path d="M7 11V7a5 5 0 0 1 9.9-1" />
+    </svg>
+  );
 }
 
 // ─── Main Component ──────────────────────────────────────────────────────────
@@ -59,7 +96,98 @@ export default function QuotingApp({ clientCode, clientName, pricing }: Props) {
   const [submitting, setSubmitting] = useState(false);
   const fileInputRefs = useRef<(HTMLInputElement | null)[]>([]);
 
-  // ── Step 1 handlers ──────────────────────────────────────────────────────
+  // ── Subject updater ──────────────────────────────────────────────────────
+
+  function patchSubject(index: number, patch: Partial<SubjectForm>) {
+    setSubjects(prev => {
+      const next = [...prev];
+      next[index] = { ...next[index], ...patch };
+      return next;
+    });
+  }
+
+  // ── Width / Height change with lock ──────────────────────────────────────
+
+  const handleWidthChange = (index: number, val: string) => {
+    const s = subjects[index];
+    if (s.lockRatio && s.ratio !== null) {
+      const w = parseFloat(val);
+      const newHeight = isNaN(w) || w <= 0 ? s.height : round1(w / s.ratio);
+      patchSubject(index, { width: val, height: newHeight });
+    } else {
+      patchSubject(index, { width: val });
+    }
+  };
+
+  const handleHeightChange = (index: number, val: string) => {
+    const s = subjects[index];
+    if (s.lockRatio && s.ratio !== null) {
+      const h = parseFloat(val);
+      const newWidth = isNaN(h) || h <= 0 ? s.width : round1(h * s.ratio);
+      patchSubject(index, { height: val, width: newWidth });
+    } else {
+      patchSubject(index, { height: val });
+    }
+  };
+
+  const toggleLock = (index: number) => {
+    patchSubject(index, { lockRatio: !subjects[index].lockRatio });
+  };
+
+  // ── File change with proportion extraction ───────────────────────────────
+
+  const handleFileChange = async (index: number, e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0] ?? null;
+    if (!file) return;
+
+    if (file.size > MAX_FILE_SIZE_MB * 1024 * 1024) {
+      alert(`File troppo grande. Massimo ${MAX_FILE_SIZE_MB} MB.`);
+      e.target.value = "";
+      return;
+    }
+
+    // Reset & mark as extracting
+    patchSubject(index, { file, extracting: true, ratio: null, lockRatio: false, proportionSource: null });
+
+    try {
+      const props = await extractProportions(file);
+
+      if (props.source === "absolute" && props.widthCm && props.heightCm) {
+        // Pre-fill both dimensions
+        patchSubject(index, {
+          extracting: false,
+          ratio: props.ratio,
+          lockRatio: true,
+          proportionSource: "absolute",
+          width: String(props.widthCm),
+          height: String(props.heightCm),
+        });
+      } else if (props.source === "proportional" && props.ratio > 0) {
+        // Only fill if one field already has a value
+        const s = subjects[index];
+        const existingW = parseFloat(s.width);
+        const existingH = parseFloat(s.height);
+        let patch: Partial<SubjectForm> = {
+          extracting: false,
+          ratio: props.ratio,
+          lockRatio: true,
+          proportionSource: "proportional",
+        };
+        if (!isNaN(existingW) && existingW > 0) {
+          patch.height = round1(existingW / props.ratio);
+        } else if (!isNaN(existingH) && existingH > 0) {
+          patch.width = round1(existingH * props.ratio);
+        }
+        patchSubject(index, patch);
+      } else {
+        patchSubject(index, { extracting: false, proportionSource: "none" });
+      }
+    } catch {
+      patchSubject(index, { extracting: false, proportionSource: "none" });
+    }
+  };
+
+  // ── Subject list handlers ────────────────────────────────────────────────
 
   const addSubject = () => {
     if (subjects.length >= 8) return;
@@ -73,23 +201,7 @@ export default function QuotingApp({ clientCode, clientName, pricing }: Props) {
     });
   };
 
-  const updateSubject = (index: number, field: keyof SubjectForm, value: string | File | null) => {
-    setSubjects(prev => {
-      const updated = [...prev];
-      updated[index] = { ...updated[index], [field]: value };
-      return updated;
-    });
-  };
-
-  const handleFileChange = (index: number, e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0] ?? null;
-    if (file && file.size > MAX_FILE_SIZE_MB * 1024 * 1024) {
-      alert(`File troppo grande. Massimo ${MAX_FILE_SIZE_MB} MB.`);
-      e.target.value = "";
-      return;
-    }
-    updateSubject(index, "file", file);
-  };
+  // ── Calculate ────────────────────────────────────────────────────────────
 
   const handleCalculate = () => {
     setError(null);
@@ -108,7 +220,7 @@ export default function QuotingApp({ clientCode, clientName, pricing }: Props) {
     setStep(2);
   };
 
-  // ── Step 2 handlers ──────────────────────────────────────────────────────
+  // ── Step 2 recalculate ───────────────────────────────────────────────────
 
   const recalculate = useCallback((cut: boolean, shipping: boolean, islands: boolean) => {
     const inputs: SubjectInput[] = subjects.map(s => ({
@@ -117,28 +229,16 @@ export default function QuotingApp({ clientCode, clientName, pricing }: Props) {
       height: parseFloat(s.height),
       quantity: parseInt(s.quantity),
     }));
-    const result = calculateNesting(inputs, pricing, cut, shipping, islands);
-    setQuote(result);
+    setQuote(calculateNesting(inputs, pricing, cut, shipping, islands));
   }, [subjects, pricing]);
 
-  const handleCutChange = (val: boolean) => {
-    setIncludeCut(val);
-    recalculate(val, includeShipping, isIslands);
-  };
-
-  const handleShippingChange = (val: boolean) => {
-    setIncludeShipping(val);
-    recalculate(includeCut, val, isIslands);
-  };
-
-  const handleIslandsChange = (val: boolean) => {
-    setIsIslands(val);
-    recalculate(includeCut, includeShipping, val);
-  };
+  const handleCutChange = (val: boolean) => { setIncludeCut(val); recalculate(val, includeShipping, isIslands); };
+  const handleShippingChange = (val: boolean) => { setIncludeShipping(val); recalculate(includeCut, val, isIslands); };
+  const handleIslandsChange = (val: boolean) => { setIsIslands(val); recalculate(includeCut, includeShipping, val); };
 
   const allFilesUploaded = subjects.every(s => s.file !== null);
 
-  // ── Step 3 — Send order ──────────────────────────────────────────────────
+  // ── Send order ───────────────────────────────────────────────────────────
 
   const handleSendOrder = async () => {
     if (!companyName.trim()) { setError("Inserisci il nome dell'azienda"); return; }
@@ -261,10 +361,24 @@ export default function QuotingApp({ clientCode, clientName, pricing }: Props) {
               <div className="space-y-4">
                 {subjects.map((s, i) => (
                   <div key={i} className="border border-gray-200 rounded-lg p-4 bg-gray-50">
+                    {/* Subject header */}
                     <div className="flex items-center justify-between mb-3">
                       <div className="flex items-center gap-2">
                         <span className="w-3 h-3 rounded-full" style={{ backgroundColor: getSubjectColor(i) }} />
                         <span className="font-semibold text-gray-800">{s.name}</span>
+                        {s.extracting && (
+                          <span className="text-xs text-blue-500 animate-pulse">Lettura file…</span>
+                        )}
+                        {!s.extracting && s.proportionSource === "absolute" && (
+                          <span className="text-xs text-green-600 bg-green-50 border border-green-200 px-1.5 py-0.5 rounded">
+                            📐 Dimensioni rilevate dal file
+                          </span>
+                        )}
+                        {!s.extracting && s.proportionSource === "proportional" && (
+                          <span className="text-xs text-blue-600 bg-blue-50 border border-blue-200 px-1.5 py-0.5 rounded">
+                            📐 Proporzioni rilevate
+                          </span>
+                        )}
                       </div>
                       {subjects.length > 1 && (
                         <button
@@ -276,68 +390,105 @@ export default function QuotingApp({ clientCode, clientName, pricing }: Props) {
                       )}
                     </div>
 
-                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                    {/* Fields grid */}
+                    <div className="grid grid-cols-1 sm:grid-cols-[1fr_auto_1fr_1fr_1fr] gap-3 items-end">
+                      {/* Larghezza */}
                       <div>
-                        <label className="block text-xs font-medium text-gray-600 mb-1">Larghezza (cm)</label>
+                        <label className="block text-xs font-medium text-gray-600 mb-1">
+                          Larghezza (cm)
+                        </label>
                         <input
                           type="number"
-                          min="1"
-                          max="57"
-                          step="0.1"
+                          min="1" max="57" step="0.1"
                           value={s.width}
-                          onChange={e => updateSubject(i, "width", e.target.value)}
+                          onChange={e => handleWidthChange(i, e.target.value)}
                           placeholder="es. 20"
                           className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
                         />
                       </div>
+
+                      {/* Lock button — only shown when proportions are known */}
+                      <div className="flex items-end justify-center pb-2">
+                        {s.ratio !== null ? (
+                          <button
+                            type="button"
+                            title={s.lockRatio ? "Proporzioni vincolate — clicca per sganciare" : "Clicca per vincolare le proporzioni"}
+                            onClick={() => toggleLock(i)}
+                            className={`w-7 h-7 rounded-full flex items-center justify-center border transition-colors ${
+                              s.lockRatio
+                                ? "bg-blue-600 border-blue-600 text-white hover:bg-blue-700"
+                                : "bg-white border-gray-300 text-gray-400 hover:border-gray-500 hover:text-gray-600"
+                            }`}
+                          >
+                            <LockIcon locked={s.lockRatio} />
+                          </button>
+                        ) : (
+                          // Empty spacer so grid alignment stays consistent
+                          <div className="w-7 h-7" />
+                        )}
+                      </div>
+
+                      {/* Altezza */}
                       <div>
-                        <label className="block text-xs font-medium text-gray-600 mb-1">Altezza (cm)</label>
+                        <label className="block text-xs font-medium text-gray-600 mb-1">
+                          Altezza (cm)
+                        </label>
                         <input
                           type="number"
-                          min="1"
-                          max="200"
-                          step="0.1"
+                          min="1" max="200" step="0.1"
                           value={s.height}
-                          onChange={e => updateSubject(i, "height", e.target.value)}
+                          onChange={e => handleHeightChange(i, e.target.value)}
                           placeholder="es. 30"
                           className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
                         />
                       </div>
+
+                      {/* Quantità */}
                       <div>
                         <label className="block text-xs font-medium text-gray-600 mb-1">Quantità (pz)</label>
                         <input
                           type="number"
-                          min="1"
-                          step="1"
+                          min="1" step="1"
                           value={s.quantity}
-                          onChange={e => updateSubject(i, "quantity", e.target.value)}
+                          onChange={e => patchSubject(i, { quantity: e.target.value })}
                           placeholder="es. 50"
                           className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
                         />
                       </div>
+
+                      {/* File */}
                       <div>
                         <label className="block text-xs font-medium text-gray-600 mb-1">
                           File grafica <span className="text-gray-400">(opz.)</span>
                         </label>
-                        <div className="relative">
-                          <input
-                            type="file"
-                            accept={ACCEPTED_FORMATS}
-                            ref={el => { fileInputRefs.current[i] = el; }}
-                            onChange={e => handleFileChange(i, e)}
-                            className="hidden"
-                          />
-                          <button
-                            type="button"
-                            onClick={() => fileInputRefs.current[i]?.click()}
-                            className={`w-full border rounded-md px-3 py-2 text-sm text-left truncate ${s.file ? "border-green-400 bg-green-50 text-green-700" : "border-gray-300 bg-white text-gray-500 hover:border-gray-400"}`}
-                          >
-                            {s.file ? s.file.name : "Carica file…"}
-                          </button>
-                        </div>
+                        <input
+                          type="file"
+                          accept={ACCEPTED_FORMATS}
+                          ref={el => { fileInputRefs.current[i] = el; }}
+                          onChange={e => handleFileChange(i, e)}
+                          className="hidden"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => fileInputRefs.current[i]?.click()}
+                          className={`w-full border rounded-md px-3 py-2 text-sm text-left truncate ${
+                            s.file
+                              ? "border-green-400 bg-green-50 text-green-700"
+                              : "border-gray-300 bg-white text-gray-500 hover:border-gray-400"
+                          }`}
+                        >
+                          {s.extracting ? "Analisi…" : s.file ? s.file.name : "Carica file…"}
+                        </button>
                         <p className="text-xs text-gray-400 mt-1">PDF, AI, SVG, PNG, JPG… max 20MB</p>
                       </div>
                     </div>
+
+                    {/* Proportional hint — shown when ratio known but only dimensions not filled */}
+                    {!s.extracting && s.proportionSource === "proportional" && s.ratio !== null && !s.width && !s.height && (
+                      <p className="mt-2 text-xs text-blue-600">
+                        Inserisci larghezza o altezza — l'altra verrà calcolata automaticamente
+                      </p>
+                    )}
                   </div>
                 ))}
               </div>
@@ -371,47 +522,22 @@ export default function QuotingApp({ clientCode, clientName, pricing }: Props) {
                 <div>
                   <p className="text-sm font-medium text-gray-700 mb-2">Tipo fornitura</p>
                   <div className="flex gap-2">
-                    <button
-                      onClick={() => handleCutChange(false)}
-                      className={`flex-1 py-2 px-3 rounded-lg border text-sm font-medium transition-colors ${!includeCut ? "bg-blue-600 text-white border-blue-600" : "bg-white text-gray-700 border-gray-300 hover:border-gray-400"}`}
-                    >
-                      Rullo intero
-                    </button>
-                    <button
-                      onClick={() => handleCutChange(true)}
-                      className={`flex-1 py-2 px-3 rounded-lg border text-sm font-medium transition-colors ${includeCut ? "bg-blue-600 text-white border-blue-600" : "bg-white text-gray-700 border-gray-300 hover:border-gray-400"}`}
-                    >
-                      Pre-tagliati (+€0,10/pz)
-                    </button>
+                    <button onClick={() => handleCutChange(false)} className={`flex-1 py-2 px-3 rounded-lg border text-sm font-medium transition-colors ${!includeCut ? "bg-blue-600 text-white border-blue-600" : "bg-white text-gray-700 border-gray-300 hover:border-gray-400"}`}>Rullo intero</button>
+                    <button onClick={() => handleCutChange(true)} className={`flex-1 py-2 px-3 rounded-lg border text-sm font-medium transition-colors ${includeCut ? "bg-blue-600 text-white border-blue-600" : "bg-white text-gray-700 border-gray-300 hover:border-gray-400"}`}>Pre-tagliati (+€0,10/pz)</button>
                   </div>
                 </div>
                 <div>
                   <p className="text-sm font-medium text-gray-700 mb-2">Consegna</p>
                   <div className="flex gap-2">
-                    <button
-                      onClick={() => handleShippingChange(true)}
-                      className={`flex-1 py-2 px-3 rounded-lg border text-sm font-medium transition-colors ${includeShipping ? "bg-blue-600 text-white border-blue-600" : "bg-white text-gray-700 border-gray-300 hover:border-gray-400"}`}
-                    >
-                      Con spedizione
-                    </button>
-                    <button
-                      onClick={() => handleShippingChange(false)}
-                      className={`flex-1 py-2 px-3 rounded-lg border text-sm font-medium transition-colors ${!includeShipping ? "bg-blue-600 text-white border-blue-600" : "bg-white text-gray-700 border-gray-300 hover:border-gray-400"}`}
-                    >
-                      Ritiro in sede
-                    </button>
+                    <button onClick={() => handleShippingChange(true)} className={`flex-1 py-2 px-3 rounded-lg border text-sm font-medium transition-colors ${includeShipping ? "bg-blue-600 text-white border-blue-600" : "bg-white text-gray-700 border-gray-300 hover:border-gray-400"}`}>Con spedizione</button>
+                    <button onClick={() => handleShippingChange(false)} className={`flex-1 py-2 px-3 rounded-lg border text-sm font-medium transition-colors ${!includeShipping ? "bg-blue-600 text-white border-blue-600" : "bg-white text-gray-700 border-gray-300 hover:border-gray-400"}`}>Ritiro in sede</button>
                   </div>
                 </div>
               </div>
               {includeShipping && (
                 <div className="mt-3">
                   <label className="flex items-center gap-2 text-sm text-gray-700 cursor-pointer w-fit">
-                    <input
-                      type="checkbox"
-                      checked={isIslands}
-                      onChange={e => handleIslandsChange(e.target.checked)}
-                      className="w-4 h-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
-                    />
+                    <input type="checkbox" checked={isIslands} onChange={e => handleIslandsChange(e.target.checked)} className="w-4 h-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500" />
                     Destinazione Isole (+€5,00)
                   </label>
                 </div>
@@ -462,11 +588,7 @@ export default function QuotingApp({ clientCode, clientName, pricing }: Props) {
                                 onChange={e => handleFileChange(i, e)}
                                 className="hidden"
                               />
-                              <button
-                                type="button"
-                                onClick={() => fileInputRefs.current[i]?.click()}
-                                className="ml-2 text-xs text-blue-600 underline"
-                              >
+                              <button type="button" onClick={() => fileInputRefs.current[i]?.click()} className="ml-2 text-xs text-blue-600 underline">
                                 Carica
                               </button>
                             </div>
@@ -521,10 +643,7 @@ export default function QuotingApp({ clientCode, clientName, pricing }: Props) {
             )}
 
             <div className="flex gap-3">
-              <button
-                onClick={() => setStep(1)}
-                className="flex-1 bg-gray-100 hover:bg-gray-200 text-gray-700 font-semibold py-3 px-6 rounded-xl transition-colors"
-              >
+              <button onClick={() => setStep(1)} className="flex-1 bg-gray-100 hover:bg-gray-200 text-gray-700 font-semibold py-3 px-6 rounded-xl transition-colors">
                 Modifica soggetti
               </button>
               <button
@@ -557,7 +676,6 @@ export default function QuotingApp({ clientCode, clientName, pricing }: Props) {
               </div>
             </div>
 
-            {/* Order summary */}
             <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
               <h2 className="text-lg font-semibold text-gray-900 mb-4">Riepilogo ordine</h2>
               <div className="text-sm text-gray-600 space-y-1 mb-4">
@@ -588,9 +706,7 @@ export default function QuotingApp({ clientCode, clientName, pricing }: Props) {
               </table>
 
               <div className="border-t border-gray-200 pt-3 space-y-1.5 text-sm">
-                <div className="flex justify-between text-gray-600">
-                  <span>Stampa</span><span>{formatCurrency(quote.totalPrintPrice)}</span>
-                </div>
+                <div className="flex justify-between text-gray-600"><span>Stampa</span><span>{formatCurrency(quote.totalPrintPrice)}</span></div>
                 {includeCut && <div className="flex justify-between text-gray-600"><span>Taglio</span><span>{formatCurrency(quote.cutPrice)}</span></div>}
                 {includeShipping && <div className="flex justify-between text-gray-600"><span>Spedizione</span><span>{quote.shippingPrice === 0 ? "Gratuita" : formatCurrency(quote.shippingPrice)}</span></div>}
                 <div className="flex justify-between font-bold text-gray-900 text-base pt-1 border-t border-gray-200">
@@ -601,10 +717,7 @@ export default function QuotingApp({ clientCode, clientName, pricing }: Props) {
             </div>
 
             <div className="flex gap-3">
-              <button
-                onClick={() => setStep(2)}
-                className="flex-1 bg-gray-100 hover:bg-gray-200 text-gray-700 font-semibold py-3 px-6 rounded-xl transition-colors"
-              >
+              <button onClick={() => setStep(2)} className="flex-1 bg-gray-100 hover:bg-gray-200 text-gray-700 font-semibold py-3 px-6 rounded-xl transition-colors">
                 Torna al preventivo
               </button>
               <button
@@ -632,17 +745,13 @@ export default function QuotingApp({ clientCode, clientName, pricing }: Props) {
               <p>Via Arzignano 10, 36070 Trissino (VI)</p>
               <p>Tel. 0445 491417</p>
             </div>
-            <button
-              onClick={handleNewQuote}
-              className="bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 px-8 rounded-xl transition-colors shadow"
-            >
+            <button onClick={handleNewQuote} className="bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 px-8 rounded-xl transition-colors shadow">
               Nuovo preventivo
             </button>
           </div>
         )}
       </main>
 
-      {/* Footer */}
       <footer className="mt-12 pb-8 text-center text-xs text-gray-400">
         STAMPOO — TAMAS SRL — Via Arzignano 10, 36070 Trissino (VI) — Tel. 0445 491417
       </footer>

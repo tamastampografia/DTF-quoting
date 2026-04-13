@@ -199,7 +199,6 @@ export default function QuotingApp({ clientCode, clientName, pricing, onLogout }
   // ── Send order ───────────────────────────────────────────────────────────
 
   const handleSendOrder = async () => {
-    if (!companyName.trim()) { setError("Inserisci il nome dell'azienda"); return; }
 
     // Check all files are uploaded
     const missingFiles = subjects.filter(s => !s.file).map(s => s.name);
@@ -213,7 +212,7 @@ export default function QuotingApp({ clientCode, clientName, pricing, onLogout }
     try {
       const inputs: SubjectInput[] = subjects.map(s => ({ name: s.name, width: parseFloat(s.width), height: parseFloat(s.height), quantity: parseInt(s.quantity) }));
       const payload = {
-        companyName: companyName.trim(),
+        companyName: clientName ?? clientCode ?? "",
         clientCode: clientCode ?? null,
         clientName: clientName ?? null,
         pricing,
@@ -496,13 +495,7 @@ export default function QuotingApp({ clientCode, clientName, pricing, onLogout }
         {step === 3 && quote && (
           <div className="space-y-4">
             <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
-              <h2 className="text-lg font-semibold text-gray-900 mb-4">Dati ordine</h2>
-              <div className="mb-4">
-                <label className="block text-sm font-medium text-gray-700 mb-1">
-                  Nome azienda <span className="text-red-500">*</span>
-                </label>
-                <input type="text" value={companyName} onChange={e => setCompanyName(e.target.value)} placeholder="Inserisci il nome della tua azienda" className="w-full border border-gray-300 rounded-lg px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
-              </div>
+              <h2 className="text-lg font-semibold text-gray-900 mb-4">Carica file grafici</h2>
               {/* File uploads — required */}
               <div>
                 <p className="text-sm font-medium text-gray-700 mb-1">

@@ -1,11 +1,12 @@
 "use client";
 
-import React, { useState, useRef, useCallback } from "react";
+import React, { useState, useRef, useCallback, useEffect } from "react";
 import { calculateNesting } from "@/lib/nesting";
 import type { NestingResult, SubjectInput, ClientPricing } from "@/lib/nesting";
 import { formatCurrency, getSubjectName, getSubjectColor } from "@/lib/utils";
 import { extractProportions } from "@/lib/extract-proportions";
 import type { FileProportions } from "@/lib/extract-proportions";
+import type { QuoteRow } from "@/lib/quotes";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -15,19 +16,22 @@ interface SubjectForm {
   height: string;
   quantity: string;
   file: File | null;
-  // proportion tracking
-  ratio: number | null;           // width/height from file
-  lockRatio: boolean;             // is the lock currently active?
+  ratio: number | null;
+  lockRatio: boolean;
   proportionSource: FileProportions["source"] | null;
-  extracting: boolean;            // async extraction in progress
+  extracting: boolean;
 }
 
-type Step = 1 | 2 | 3 | 4;
+// Step 4 has two variants: order confirmed, or quote saved
+type Step = 1 | 2 | 3 | "saved" | "confirmed";
 
 interface Props {
   clientCode?: string;
   clientName?: string;
   pricing: ClientPricing;
+  // When coming from ClientArea ("Converti in ordine")
+  preloadedQuote?: QuoteRow;
+  onBackToArea?: () => void;
 }
 
 const ACCEPTED_FORMATS = ".pdf,.ai,.eps,.svg,.png,.jpg,.jpeg,.tif,.tiff,.psd,.cdr";
@@ -39,6 +43,18 @@ function emptySubject(index: number): SubjectForm {
   return {
     name: getSubjectName(index),
     width: "", height: "", quantity: "",
+    file: null,
+    ratio: null, lockRatio: false,
+    proportionSource: null, extracting: false,
+  };
+}
+
+function subjectFromInput(inp: SubjectInput, i: number): SubjectForm {
+  return {
+    name: inp.name,
+    width: String(inp.width),
+    height: String(inp.height),
+    quantity: String(inp.quantity),
     file: null,
     ratio: null, lockRatio: false,
     proportionSource: null, extracting: false,
@@ -66,14 +82,12 @@ function validateSubjects(subjects: SubjectForm[]): string | null {
 
 function LockIcon({ locked }: { locked: boolean }) {
   return locked ? (
-    // Closed lock
     <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24"
       fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
       <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
       <path d="M7 11V7a5 5 0 0 1 10 0v4" />
     </svg>
   ) : (
-    // Open lock
     <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24"
       fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
       <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
@@ -84,16 +98,29 @@ function LockIcon({ locked }: { locked: boolean }) {
 
 // ─── Main Component ──────────────────────────────────────────────────────────
 
-export default function QuotingApp({ clientCode, clientName, pricing }: Props) {
-  const [step, setStep] = useState<Step>(1);
-  const [subjects, setSubjects] = useState<SubjectForm[]>([emptySubject(0)]);
-  const [includeCut, setIncludeCut] = useState(false);
-  const [includeShipping, setIncludeShipping] = useState(true);
-  const [isIslands, setIsIslands] = useState(false);
-  const [quote, setQuote] = useState<NestingResult | null>(null);
+export default function QuotingApp({ clientCode, clientName, pricing, preloadedQuote, onBackToArea }: Props) {
+  // If preloadedQuote is set, we start at step 2 with all data pre-filled
+  const isConverting = !!preloadedQuote;
+
+  const [step, setStep] = useState<Step>(isConverting ? 2 : 1);
+  const [subjects, setSubjects] = useState<SubjectForm[]>(() => {
+    if (preloadedQuote) {
+      return preloadedQuote.payload.subjects.map((inp, i) => subjectFromInput(inp, i));
+    }
+    return [emptySubject(0)];
+  });
+  const [includeCut, setIncludeCut] = useState(preloadedQuote?.payload.includeCut ?? false);
+  const [includeShipping, setIncludeShipping] = useState(preloadedQuote?.payload.includeShipping ?? true);
+  const [isIslands, setIsIslands] = useState(preloadedQuote?.payload.isIslands ?? false);
+  const [quote, setQuote] = useState<NestingResult | null>(preloadedQuote?.payload.quote ?? null);
   const [companyName, setCompanyName] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [savingQuote, setSavingQuote] = useState(false);
+  const [savedQuoteId, setSavedQuoteId] = useState<string | null>(null);
+  // ID of preloaded quote to mark as 'ordered' when sending
+  const [preloadedQuoteId] = useState<string | null>(preloadedQuote?.id ?? null);
+
   const fileInputRefs = useRef<(HTMLInputElement | null)[]>([]);
 
   // ── Subject updater ──────────────────────────────────────────────────────
@@ -106,14 +133,13 @@ export default function QuotingApp({ clientCode, clientName, pricing }: Props) {
     });
   }
 
-  // ── Width / Height change with lock ──────────────────────────────────────
+  // ── Width / Height with lock ─────────────────────────────────────────────
 
   const handleWidthChange = (index: number, val: string) => {
     const s = subjects[index];
     if (s.lockRatio && s.ratio !== null) {
       const w = parseFloat(val);
-      const newHeight = isNaN(w) || w <= 0 ? s.height : round1(w / s.ratio);
-      patchSubject(index, { width: val, height: newHeight });
+      patchSubject(index, { width: val, height: isNaN(w) || w <= 0 ? s.height : round1(w / s.ratio) });
     } else {
       patchSubject(index, { width: val });
     }
@@ -123,61 +149,36 @@ export default function QuotingApp({ clientCode, clientName, pricing }: Props) {
     const s = subjects[index];
     if (s.lockRatio && s.ratio !== null) {
       const h = parseFloat(val);
-      const newWidth = isNaN(h) || h <= 0 ? s.width : round1(h * s.ratio);
-      patchSubject(index, { height: val, width: newWidth });
+      patchSubject(index, { height: val, width: isNaN(h) || h <= 0 ? s.width : round1(h * s.ratio) });
     } else {
       patchSubject(index, { height: val });
     }
   };
 
-  const toggleLock = (index: number) => {
-    patchSubject(index, { lockRatio: !subjects[index].lockRatio });
-  };
+  const toggleLock = (index: number) => patchSubject(index, { lockRatio: !subjects[index].lockRatio });
 
-  // ── File change with proportion extraction ───────────────────────────────
+  // ── File change ──────────────────────────────────────────────────────────
 
   const handleFileChange = async (index: number, e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0] ?? null;
     if (!file) return;
-
     if (file.size > MAX_FILE_SIZE_MB * 1024 * 1024) {
       alert(`File troppo grande. Massimo ${MAX_FILE_SIZE_MB} MB.`);
       e.target.value = "";
       return;
     }
-
-    // Reset & mark as extracting
     patchSubject(index, { file, extracting: true, ratio: null, lockRatio: false, proportionSource: null });
-
     try {
       const props = await extractProportions(file);
-
       if (props.source === "absolute" && props.widthCm && props.heightCm) {
-        // Pre-fill both dimensions
-        patchSubject(index, {
-          extracting: false,
-          ratio: props.ratio,
-          lockRatio: true,
-          proportionSource: "absolute",
-          width: String(props.widthCm),
-          height: String(props.heightCm),
-        });
+        patchSubject(index, { extracting: false, ratio: props.ratio, lockRatio: true, proportionSource: "absolute", width: String(props.widthCm), height: String(props.heightCm) });
       } else if (props.source === "proportional" && props.ratio > 0) {
-        // Only fill if one field already has a value
         const s = subjects[index];
         const existingW = parseFloat(s.width);
         const existingH = parseFloat(s.height);
-        let patch: Partial<SubjectForm> = {
-          extracting: false,
-          ratio: props.ratio,
-          lockRatio: true,
-          proportionSource: "proportional",
-        };
-        if (!isNaN(existingW) && existingW > 0) {
-          patch.height = round1(existingW / props.ratio);
-        } else if (!isNaN(existingH) && existingH > 0) {
-          patch.width = round1(existingH * props.ratio);
-        }
+        const patch: Partial<SubjectForm> = { extracting: false, ratio: props.ratio, lockRatio: true, proportionSource: "proportional" };
+        if (!isNaN(existingW) && existingW > 0) patch.height = round1(existingW / props.ratio);
+        else if (!isNaN(existingH) && existingH > 0) patch.width = round1(existingH * props.ratio);
         patchSubject(index, patch);
       } else {
         patchSubject(index, { extracting: false, proportionSource: "none" });
@@ -187,7 +188,7 @@ export default function QuotingApp({ clientCode, clientName, pricing }: Props) {
     }
   };
 
-  // ── Subject list handlers ────────────────────────────────────────────────
+  // ── Subject list ─────────────────────────────────────────────────────────
 
   const addSubject = () => {
     if (subjects.length >= 8) return;
@@ -205,30 +206,17 @@ export default function QuotingApp({ clientCode, clientName, pricing }: Props) {
 
   const handleCalculate = () => {
     setError(null);
-    const validationError = validateSubjects(subjects);
-    if (validationError) { setError(validationError); return; }
-
-    const inputs: SubjectInput[] = subjects.map(s => ({
-      name: s.name,
-      width: parseFloat(s.width),
-      height: parseFloat(s.height),
-      quantity: parseInt(s.quantity),
-    }));
-
-    const result = calculateNesting(inputs, pricing, includeCut, includeShipping, isIslands);
-    setQuote(result);
+    const err = validateSubjects(subjects);
+    if (err) { setError(err); return; }
+    const inputs: SubjectInput[] = subjects.map(s => ({ name: s.name, width: parseFloat(s.width), height: parseFloat(s.height), quantity: parseInt(s.quantity) }));
+    setQuote(calculateNesting(inputs, pricing, includeCut, includeShipping, isIslands));
     setStep(2);
   };
 
   // ── Step 2 recalculate ───────────────────────────────────────────────────
 
   const recalculate = useCallback((cut: boolean, shipping: boolean, islands: boolean) => {
-    const inputs: SubjectInput[] = subjects.map(s => ({
-      name: s.name,
-      width: parseFloat(s.width),
-      height: parseFloat(s.height),
-      quantity: parseInt(s.quantity),
-    }));
+    const inputs: SubjectInput[] = subjects.map(s => ({ name: s.name, width: parseFloat(s.width), height: parseFloat(s.height), quantity: parseInt(s.quantity) }));
     setQuote(calculateNesting(inputs, pricing, cut, shipping, islands));
   }, [subjects, pricing]);
 
@@ -238,23 +226,49 @@ export default function QuotingApp({ clientCode, clientName, pricing }: Props) {
 
   const allFilesUploaded = subjects.every(s => s.file !== null);
 
+  // ── Save as quote (draft) ────────────────────────────────────────────────
+
+  const handleSaveQuote = async () => {
+    if (!clientCode || !quote) return;
+    setSavingQuote(true);
+    setError(null);
+    try {
+      const payload = {
+        clientCode,
+        clientName: clientName ?? null,
+        pricing,
+        subjects: subjects.map(s => ({ name: s.name, width: parseFloat(s.width), height: parseFloat(s.height), quantity: parseInt(s.quantity) })),
+        quote,
+        includeCut,
+        includeShipping,
+        isIslands,
+        createdAt: new Date().toISOString(),
+      };
+      const res = await fetch("/api/save-quote", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? "Errore");
+      setSavedQuoteId(data.id);
+      setStep("saved");
+    } catch (err: any) {
+      setError(err.message ?? "Errore nel salvataggio");
+    } finally {
+      setSavingQuote(false);
+    }
+  };
+
   // ── Send order ───────────────────────────────────────────────────────────
 
   const handleSendOrder = async () => {
     if (!companyName.trim()) { setError("Inserisci il nome dell'azienda"); return; }
     if (!allFilesUploaded) { setError("Carica tutti i file grafici prima di inviare"); return; }
-
     setSubmitting(true);
     setError(null);
-
     try {
-      const inputs: SubjectInput[] = subjects.map(s => ({
-        name: s.name,
-        width: parseFloat(s.width),
-        height: parseFloat(s.height),
-        quantity: parseInt(s.quantity),
-      }));
-
+      const inputs: SubjectInput[] = subjects.map(s => ({ name: s.name, width: parseFloat(s.width), height: parseFloat(s.height), quantity: parseInt(s.quantity) }));
       const payload = {
         companyName: companyName.trim(),
         clientCode: clientCode ?? null,
@@ -268,20 +282,23 @@ export default function QuotingApp({ clientCode, clientName, pricing }: Props) {
         isIslands,
         createdAt: new Date().toISOString(),
       };
-
       const formData = new FormData();
       formData.append("payload", JSON.stringify(payload));
-      subjects.forEach((s, i) => {
-        if (s.file) formData.append(`file_${i}`, s.file);
-      });
+      subjects.forEach((s, i) => { if (s.file) formData.append(`file_${i}`, s.file); });
 
       const res = await fetch("/api/send-order", { method: "POST", body: formData });
-      if (!res.ok) {
-        const data = await res.json();
-        throw new Error(data.error ?? "Errore nell'invio");
+      if (!res.ok) { const d = await res.json(); throw new Error(d.error ?? "Errore nell'invio"); }
+
+      // If this was a preloaded quote (converting draft → order), mark it as ordered
+      if (preloadedQuoteId) {
+        await fetch("/api/quotes", {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ id: preloadedQuoteId, status: "ordered" }),
+        }).catch(() => {}); // non-blocking
       }
 
-      setStep(4);
+      setStep("confirmed");
     } catch (err: any) {
       setError(err.message ?? "Errore nell'invio dell'ordine");
     } finally {
@@ -298,7 +315,12 @@ export default function QuotingApp({ clientCode, clientName, pricing }: Props) {
     setQuote(null);
     setCompanyName("");
     setError(null);
+    setSavedQuoteId(null);
   };
+
+  // ── Progress bar helpers ─────────────────────────────────────────────────
+
+  const stepNumber = step === 1 ? 1 : step === 2 ? 2 : step === 3 ? 3 : 4;
 
   // ── Render ───────────────────────────────────────────────────────────────
 
@@ -311,13 +333,18 @@ export default function QuotingApp({ clientCode, clientName, pricing }: Props) {
             <h1 className="text-2xl font-bold text-gray-900">STAMPOO</h1>
             <p className="text-sm text-gray-500">Transfer DTF — Preventivo online</p>
           </div>
-          {(pricing.type === "fixed" || pricing.type === "discount") && (
-            <span className="bg-green-100 text-green-800 text-sm font-semibold px-3 py-1 rounded-full border border-green-200">
-              {pricing.type === "fixed"
-                ? `Prezzo riservato: ${formatCurrency(pricing.value)}/m`
-                : `Sconto riservato: -${pricing.value}%`}
-            </span>
-          )}
+          <div className="flex items-center gap-3">
+            {(pricing.type === "fixed" || pricing.type === "discount") && (
+              <span className="bg-green-100 text-green-800 text-sm font-semibold px-3 py-1 rounded-full border border-green-200">
+                {pricing.type === "fixed" ? `Prezzo riservato: ${formatCurrency(pricing.value)}/m` : `Sconto riservato: -${pricing.value}%`}
+              </span>
+            )}
+            {clientCode && (
+              <a href={`/${clientCode}/area`} className="text-sm text-blue-600 hover:underline hidden sm:block">
+                I miei preventivi →
+              </a>
+            )}
+          </div>
         </div>
       </header>
 
@@ -327,15 +354,15 @@ export default function QuotingApp({ clientCode, clientName, pricing }: Props) {
           <div className="flex items-center gap-2">
             {[1, 2, 3, 4].map(s => (
               <React.Fragment key={s}>
-                <div className={`flex items-center gap-1.5 ${step >= s ? "text-blue-600" : "text-gray-400"}`}>
-                  <div className={`w-7 h-7 rounded-full flex items-center justify-center text-sm font-semibold border-2 ${step > s ? "bg-blue-600 border-blue-600 text-white" : step === s ? "border-blue-600 text-blue-600" : "border-gray-300 text-gray-400"}`}>
-                    {step > s ? "✓" : s}
+                <div className={`flex items-center gap-1.5 ${stepNumber >= s ? "text-blue-600" : "text-gray-400"}`}>
+                  <div className={`w-7 h-7 rounded-full flex items-center justify-center text-sm font-semibold border-2 ${stepNumber > s ? "bg-blue-600 border-blue-600 text-white" : stepNumber === s ? "border-blue-600 text-blue-600" : "border-gray-300 text-gray-400"}`}>
+                    {stepNumber > s ? "✓" : s}
                   </div>
                   <span className="text-sm font-medium hidden sm:inline">
                     {s === 1 ? "Soggetti" : s === 2 ? "Preventivo" : s === 3 ? "Ordine" : "Conferma"}
                   </span>
                 </div>
-                {s < 4 && <div className={`flex-1 h-0.5 ${step > s ? "bg-blue-600" : "bg-gray-200"}`} />}
+                {s < 4 && <div className={`flex-1 h-0.5 ${stepNumber > s ? "bg-blue-600" : "bg-gray-200"}`} />}
               </React.Fragment>
             ))}
           </div>
@@ -343,11 +370,7 @@ export default function QuotingApp({ clientCode, clientName, pricing }: Props) {
       </div>
 
       <main className="max-w-4xl mx-auto px-4 py-8">
-        {error && (
-          <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg text-red-700 text-sm">
-            {error}
-          </div>
-        )}
+        {error && <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg text-red-700 text-sm">{error}</div>}
 
         {/* ── STEP 1 ─────────────────────────────────────────────────────── */}
         {step === 1 && (
@@ -357,156 +380,69 @@ export default function QuotingApp({ clientCode, clientName, pricing }: Props) {
               <p className="text-sm text-gray-500 mb-6">
                 Larghezza massima rullo: <strong>58 cm</strong> — Ordine minimo: <strong>50 cm</strong> di rullo
               </p>
-
               <div className="space-y-4">
                 {subjects.map((s, i) => (
                   <div key={i} className="border border-gray-200 rounded-lg p-4 bg-gray-50">
-                    {/* Subject header */}
                     <div className="flex items-center justify-between mb-3">
-                      <div className="flex items-center gap-2">
+                      <div className="flex items-center gap-2 flex-wrap">
                         <span className="w-3 h-3 rounded-full" style={{ backgroundColor: getSubjectColor(i) }} />
                         <span className="font-semibold text-gray-800">{s.name}</span>
-                        {s.extracting && (
-                          <span className="text-xs text-blue-500 animate-pulse">Lettura file…</span>
-                        )}
+                        {s.extracting && <span className="text-xs text-blue-500 animate-pulse">Lettura file…</span>}
                         {!s.extracting && s.proportionSource === "absolute" && (
-                          <span className="text-xs text-green-600 bg-green-50 border border-green-200 px-1.5 py-0.5 rounded">
-                            📐 Dimensioni rilevate dal file
-                          </span>
+                          <span className="text-xs text-green-600 bg-green-50 border border-green-200 px-1.5 py-0.5 rounded">📐 Dimensioni rilevate dal file</span>
                         )}
                         {!s.extracting && s.proportionSource === "proportional" && (
-                          <span className="text-xs text-blue-600 bg-blue-50 border border-blue-200 px-1.5 py-0.5 rounded">
-                            📐 Proporzioni rilevate
-                          </span>
+                          <span className="text-xs text-blue-600 bg-blue-50 border border-blue-200 px-1.5 py-0.5 rounded">📐 Proporzioni rilevate</span>
                         )}
                       </div>
                       {subjects.length > 1 && (
-                        <button
-                          onClick={() => removeSubject(i)}
-                          className="text-red-400 hover:text-red-600 text-sm font-medium"
-                        >
-                          Rimuovi
-                        </button>
+                        <button onClick={() => removeSubject(i)} className="text-red-400 hover:text-red-600 text-sm font-medium">Rimuovi</button>
                       )}
                     </div>
-
-                    {/* Fields grid */}
                     <div className="grid grid-cols-1 sm:grid-cols-[1fr_auto_1fr_1fr_1fr] gap-3 items-end">
-                      {/* Larghezza */}
                       <div>
-                        <label className="block text-xs font-medium text-gray-600 mb-1">
-                          Larghezza (cm)
-                        </label>
-                        <input
-                          type="number"
-                          min="1" max="57" step="0.1"
-                          value={s.width}
-                          onChange={e => handleWidthChange(i, e.target.value)}
-                          placeholder="es. 20"
-                          className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-                        />
+                        <label className="block text-xs font-medium text-gray-600 mb-1">Larghezza (cm)</label>
+                        <input type="number" min="1" max="57" step="0.1" value={s.width} onChange={e => handleWidthChange(i, e.target.value)} placeholder="es. 20" className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
                       </div>
-
-                      {/* Lock button — only shown when proportions are known */}
                       <div className="flex items-end justify-center pb-2">
                         {s.ratio !== null ? (
-                          <button
-                            type="button"
-                            title={s.lockRatio ? "Proporzioni vincolate — clicca per sganciare" : "Clicca per vincolare le proporzioni"}
-                            onClick={() => toggleLock(i)}
-                            className={`w-7 h-7 rounded-full flex items-center justify-center border transition-colors ${
-                              s.lockRatio
-                                ? "bg-blue-600 border-blue-600 text-white hover:bg-blue-700"
-                                : "bg-white border-gray-300 text-gray-400 hover:border-gray-500 hover:text-gray-600"
-                            }`}
-                          >
+                          <button type="button" title={s.lockRatio ? "Proporzioni vincolate" : "Clicca per vincolare"} onClick={() => toggleLock(i)}
+                            className={`w-7 h-7 rounded-full flex items-center justify-center border transition-colors ${s.lockRatio ? "bg-blue-600 border-blue-600 text-white hover:bg-blue-700" : "bg-white border-gray-300 text-gray-400 hover:border-gray-500"}`}>
                             <LockIcon locked={s.lockRatio} />
                           </button>
-                        ) : (
-                          // Empty spacer so grid alignment stays consistent
-                          <div className="w-7 h-7" />
-                        )}
+                        ) : <div className="w-7 h-7" />}
                       </div>
-
-                      {/* Altezza */}
                       <div>
-                        <label className="block text-xs font-medium text-gray-600 mb-1">
-                          Altezza (cm)
-                        </label>
-                        <input
-                          type="number"
-                          min="1" max="200" step="0.1"
-                          value={s.height}
-                          onChange={e => handleHeightChange(i, e.target.value)}
-                          placeholder="es. 30"
-                          className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-                        />
+                        <label className="block text-xs font-medium text-gray-600 mb-1">Altezza (cm)</label>
+                        <input type="number" min="1" max="200" step="0.1" value={s.height} onChange={e => handleHeightChange(i, e.target.value)} placeholder="es. 30" className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
                       </div>
-
-                      {/* Quantità */}
                       <div>
                         <label className="block text-xs font-medium text-gray-600 mb-1">Quantità (pz)</label>
-                        <input
-                          type="number"
-                          min="1" step="1"
-                          value={s.quantity}
-                          onChange={e => patchSubject(i, { quantity: e.target.value })}
-                          placeholder="es. 50"
-                          className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-                        />
+                        <input type="number" min="1" step="1" value={s.quantity} onChange={e => patchSubject(i, { quantity: e.target.value })} placeholder="es. 50" className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
                       </div>
-
-                      {/* File */}
                       <div>
-                        <label className="block text-xs font-medium text-gray-600 mb-1">
-                          File grafica <span className="text-gray-400">(opz.)</span>
-                        </label>
-                        <input
-                          type="file"
-                          accept={ACCEPTED_FORMATS}
-                          ref={el => { fileInputRefs.current[i] = el; }}
-                          onChange={e => handleFileChange(i, e)}
-                          className="hidden"
-                        />
-                        <button
-                          type="button"
-                          onClick={() => fileInputRefs.current[i]?.click()}
-                          className={`w-full border rounded-md px-3 py-2 text-sm text-left truncate ${
-                            s.file
-                              ? "border-green-400 bg-green-50 text-green-700"
-                              : "border-gray-300 bg-white text-gray-500 hover:border-gray-400"
-                          }`}
-                        >
+                        <label className="block text-xs font-medium text-gray-600 mb-1">File grafica <span className="text-gray-400">(opz.)</span></label>
+                        <input type="file" accept={ACCEPTED_FORMATS} ref={el => { fileInputRefs.current[i] = el; }} onChange={e => handleFileChange(i, e)} className="hidden" />
+                        <button type="button" onClick={() => fileInputRefs.current[i]?.click()}
+                          className={`w-full border rounded-md px-3 py-2 text-sm text-left truncate ${s.file ? "border-green-400 bg-green-50 text-green-700" : "border-gray-300 bg-white text-gray-500 hover:border-gray-400"}`}>
                           {s.extracting ? "Analisi…" : s.file ? s.file.name : "Carica file…"}
                         </button>
                         <p className="text-xs text-gray-400 mt-1">PDF, AI, SVG, PNG, JPG… max 20MB</p>
                       </div>
                     </div>
-
-                    {/* Proportional hint — shown when ratio known but only dimensions not filled */}
                     {!s.extracting && s.proportionSource === "proportional" && s.ratio !== null && !s.width && !s.height && (
-                      <p className="mt-2 text-xs text-blue-600">
-                        Inserisci larghezza o altezza — l'altra verrà calcolata automaticamente
-                      </p>
+                      <p className="mt-2 text-xs text-blue-600">Inserisci larghezza o altezza — l'altra verrà calcolata automaticamente</p>
                     )}
                   </div>
                 ))}
               </div>
-
               {subjects.length < 8 && (
-                <button
-                  onClick={addSubject}
-                  className="mt-4 flex items-center gap-1.5 text-blue-600 hover:text-blue-800 text-sm font-medium"
-                >
+                <button onClick={addSubject} className="mt-4 flex items-center gap-1.5 text-blue-600 hover:text-blue-800 text-sm font-medium">
                   <span className="text-lg leading-none">+</span> Aggiungi soggetto
                 </button>
               )}
             </div>
-
-            <button
-              onClick={handleCalculate}
-              className="w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 px-6 rounded-xl transition-colors text-base shadow"
-            >
+            <button onClick={handleCalculate} className="w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 px-6 rounded-xl transition-colors text-base shadow">
               Calcola preventivo
             </button>
           </div>
@@ -515,6 +451,18 @@ export default function QuotingApp({ clientCode, clientName, pricing }: Props) {
         {/* ── STEP 2 ─────────────────────────────────────────────────────── */}
         {step === 2 && quote && (
           <div className="space-y-4">
+            {/* Banner: converting from saved quote */}
+            {isConverting && (
+              <div className="bg-blue-50 border border-blue-200 rounded-lg px-4 py-3 flex items-center justify-between">
+                <p className="text-sm text-blue-700">
+                  <strong>Conversione preventivo in ordine.</strong> Carica i file grafici e procedi.
+                </p>
+                {onBackToArea && (
+                  <button onClick={onBackToArea} className="text-xs text-blue-600 hover:underline ml-4 whitespace-nowrap">← Torna all'area</button>
+                )}
+              </div>
+            )}
+
             {/* Options */}
             <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
               <h2 className="text-lg font-semibold text-gray-900 mb-4">Opzioni fornitura</h2>
@@ -581,16 +529,8 @@ export default function QuotingApp({ clientCode, clientName, pricing }: Props) {
                           ) : (
                             <div>
                               <span className="text-amber-500 text-xs">Non caricato</span>
-                              <input
-                                type="file"
-                                accept={ACCEPTED_FORMATS}
-                                ref={el => { fileInputRefs.current[i] = el; }}
-                                onChange={e => handleFileChange(i, e)}
-                                className="hidden"
-                              />
-                              <button type="button" onClick={() => fileInputRefs.current[i]?.click()} className="ml-2 text-xs text-blue-600 underline">
-                                Carica
-                              </button>
+                              <input type="file" accept={ACCEPTED_FORMATS} ref={el => { fileInputRefs.current[i] = el; }} onChange={e => handleFileChange(i, e)} className="hidden" />
+                              <button type="button" onClick={() => fileInputRefs.current[i]?.click()} className="ml-2 text-xs text-blue-600 underline">Carica</button>
                             </div>
                           )}
                         </td>
@@ -607,27 +547,10 @@ export default function QuotingApp({ clientCode, clientName, pricing }: Props) {
             <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
               <h2 className="text-lg font-semibold text-gray-900 mb-4">Riepilogo economico</h2>
               <div className="space-y-2">
-                <div className="flex justify-between text-sm text-gray-700">
-                  <span>Totale stampa</span>
-                  <span className="font-medium">{formatCurrency(quote.totalPrintPrice)}</span>
-                </div>
-                {includeCut && (
-                  <div className="flex justify-between text-sm text-gray-700">
-                    <span>Taglio pezzi ({subjects.reduce((a, s) => a + parseInt(s.quantity || "0"), 0)} pz × €0,10)</span>
-                    <span className="font-medium">{formatCurrency(quote.cutPrice)}</span>
-                  </div>
-                )}
-                {includeShipping && (
-                  <div className="flex justify-between text-sm text-gray-700">
-                    <span>Spedizione</span>
-                    <span className={`font-medium ${quote.shippingPrice === 0 ? "text-green-600" : ""}`}>
-                      {quote.shippingPrice === 0 ? "Gratuita" : formatCurrency(quote.shippingPrice)}
-                    </span>
-                  </div>
-                )}
-                {includeShipping && quote.shippingPrice === 0 && (
-                  <p className="text-xs text-green-600">Spedizione gratuita per ordini ≥ €200</p>
-                )}
+                <div className="flex justify-between text-sm text-gray-700"><span>Totale stampa</span><span className="font-medium">{formatCurrency(quote.totalPrintPrice)}</span></div>
+                {includeCut && <div className="flex justify-between text-sm text-gray-700"><span>Taglio pezzi ({subjects.reduce((a, s) => a + parseInt(s.quantity || "0"), 0)} pz × €0,10)</span><span className="font-medium">{formatCurrency(quote.cutPrice)}</span></div>}
+                {includeShipping && <div className="flex justify-between text-sm text-gray-700"><span>Spedizione</span><span className={`font-medium ${quote.shippingPrice === 0 ? "text-green-600" : ""}`}>{quote.shippingPrice === 0 ? "Gratuita" : formatCurrency(quote.shippingPrice)}</span></div>}
+                {includeShipping && quote.shippingPrice === 0 && <p className="text-xs text-green-600">Spedizione gratuita per ordini ≥ €200</p>}
                 <div className="border-t border-gray-200 pt-3 mt-3 flex justify-between items-center">
                   <span className="text-base font-bold text-gray-900">Totale ordine</span>
                   <span className="text-2xl font-bold text-blue-600">{formatCurrency(quote.grandTotal)}</span>
@@ -636,22 +559,45 @@ export default function QuotingApp({ clientCode, clientName, pricing }: Props) {
               <p className="text-xs text-gray-400 mt-3">Spedizione pronta in 48h dall'ordine</p>
             </div>
 
-            {!allFilesUploaded && (
+            {!allFilesUploaded && !isConverting && (
               <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 text-sm text-amber-700">
-                Per confermare l'ordine devi caricare il file grafica per tutti i soggetti.
+                Per confermare l'ordine devi caricare il file grafica per tutti i soggetti. Puoi anche <strong>salvare il preventivo</strong> ora e caricare i file in seguito.
+              </div>
+            )}
+            {!allFilesUploaded && isConverting && (
+              <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 text-sm text-amber-700">
+                Carica il file grafica per tutti i soggetti prima di inviare l'ordine.
               </div>
             )}
 
-            <div className="flex gap-3">
-              <button onClick={() => setStep(1)} className="flex-1 bg-gray-100 hover:bg-gray-200 text-gray-700 font-semibold py-3 px-6 rounded-xl transition-colors">
-                Modifica soggetti
+            {/* Action buttons */}
+            <div className="flex flex-col sm:flex-row gap-3">
+              {/* Back */}
+              <button
+                onClick={() => isConverting && onBackToArea ? onBackToArea() : setStep(1)}
+                className="sm:flex-1 bg-gray-100 hover:bg-gray-200 text-gray-700 font-semibold py-3 px-5 rounded-xl transition-colors"
+              >
+                {isConverting ? "← Torna all'area" : "Modifica soggetti"}
               </button>
+
+              {/* Save as quote — only for identified clients, not when converting */}
+              {clientCode && !isConverting && (
+                <button
+                  onClick={handleSaveQuote}
+                  disabled={savingQuote}
+                  className="sm:flex-1 bg-amber-500 hover:bg-amber-600 text-white font-semibold py-3 px-5 rounded-xl transition-colors shadow disabled:opacity-50"
+                >
+                  {savingQuote ? "Salvataggio…" : "💾 Salva preventivo"}
+                </button>
+              )}
+
+              {/* Confirm order */}
               <button
                 onClick={() => { setError(null); setStep(3); }}
                 disabled={!allFilesUploaded}
-                className={`flex-2 bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 px-8 rounded-xl transition-colors shadow ${!allFilesUploaded ? "opacity-50 cursor-not-allowed" : ""}`}
+                className={`sm:flex-1 bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 px-5 rounded-xl transition-colors shadow ${!allFilesUploaded ? "opacity-50 cursor-not-allowed" : ""}`}
               >
-                Conferma ordine →
+                {isConverting ? "Procedi all'ordine →" : "Conferma ordine →"}
               </button>
             </div>
           </div>
@@ -666,16 +612,9 @@ export default function QuotingApp({ clientCode, clientName, pricing }: Props) {
                 <label className="block text-sm font-medium text-gray-700 mb-1">
                   Nome azienda <span className="text-red-500">*</span>
                 </label>
-                <input
-                  type="text"
-                  value={companyName}
-                  onChange={e => setCompanyName(e.target.value)}
-                  placeholder="Inserisci il nome della tua azienda"
-                  className="w-full border border-gray-300 rounded-lg px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-                />
+                <input type="text" value={companyName} onChange={e => setCompanyName(e.target.value)} placeholder="Inserisci il nome della tua azienda" className="w-full border border-gray-300 rounded-lg px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
               </div>
             </div>
-
             <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
               <h2 className="text-lg font-semibold text-gray-900 mb-4">Riepilogo ordine</h2>
               <div className="text-sm text-gray-600 space-y-1 mb-4">
@@ -683,14 +622,13 @@ export default function QuotingApp({ clientCode, clientName, pricing }: Props) {
                 <p><span className="font-medium">Consegna:</span> {includeShipping ? (isIslands ? "Spedizione (Isole)" : "Spedizione standard") : "Ritiro in sede"}</p>
                 <p><span className="font-medium">Prezzo/m:</span> {formatCurrency(quote.pricePerMeter)}/m — <span className="font-medium">Metri:</span> {quote.totalRollMeters.toFixed(2)} m</p>
               </div>
-
               <table className="w-full text-sm mb-4">
                 <thead className="bg-gray-50 text-xs uppercase text-gray-500">
                   <tr>
-                    <th className="text-left px-3 py-2 rounded-l">Soggetto</th>
+                    <th className="text-left px-3 py-2">Soggetto</th>
                     <th className="text-left px-3 py-2">Dim.</th>
                     <th className="text-right px-3 py-2">Pz</th>
-                    <th className="text-right px-3 py-2 rounded-r">Totale</th>
+                    <th className="text-right px-3 py-2">Totale</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -704,7 +642,6 @@ export default function QuotingApp({ clientCode, clientName, pricing }: Props) {
                   ))}
                 </tbody>
               </table>
-
               <div className="border-t border-gray-200 pt-3 space-y-1.5 text-sm">
                 <div className="flex justify-between text-gray-600"><span>Stampa</span><span>{formatCurrency(quote.totalPrintPrice)}</span></div>
                 {includeCut && <div className="flex justify-between text-gray-600"><span>Taglio</span><span>{formatCurrency(quote.cutPrice)}</span></div>}
@@ -715,24 +652,42 @@ export default function QuotingApp({ clientCode, clientName, pricing }: Props) {
                 </div>
               </div>
             </div>
-
             <div className="flex gap-3">
-              <button onClick={() => setStep(2)} className="flex-1 bg-gray-100 hover:bg-gray-200 text-gray-700 font-semibold py-3 px-6 rounded-xl transition-colors">
-                Torna al preventivo
-              </button>
-              <button
-                onClick={handleSendOrder}
-                disabled={submitting}
-                className="flex-2 bg-green-600 hover:bg-green-700 text-white font-semibold py-3 px-8 rounded-xl transition-colors shadow disabled:opacity-50"
-              >
+              <button onClick={() => setStep(2)} className="flex-1 bg-gray-100 hover:bg-gray-200 text-gray-700 font-semibold py-3 px-6 rounded-xl transition-colors">Torna al preventivo</button>
+              <button onClick={handleSendOrder} disabled={submitting} className="flex-2 bg-green-600 hover:bg-green-700 text-white font-semibold py-3 px-8 rounded-xl transition-colors shadow disabled:opacity-50">
                 {submitting ? "Invio in corso…" : "Invia ordine"}
               </button>
             </div>
           </div>
         )}
 
-        {/* ── STEP 4 ─────────────────────────────────────────────────────── */}
-        {step === 4 && (
+        {/* ── STEP: SAVED ─────────────────────────────────────────────────── */}
+        {step === "saved" && (
+          <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-10 text-center">
+            <div className="w-16 h-16 bg-amber-100 rounded-full flex items-center justify-center mx-auto mb-4">
+              <span className="text-3xl">💾</span>
+            </div>
+            <h2 className="text-2xl font-bold text-gray-900 mb-2">Preventivo salvato!</h2>
+            <p className="text-gray-600 mb-6">
+              Il preventivo è stato salvato nella tua area personale.<br />
+              Potrai confermarlo come ordine in qualsiasi momento.
+            </p>
+            <div className="flex flex-col sm:flex-row gap-3 justify-center">
+              <a
+                href={`/${clientCode}/area`}
+                className="bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 px-6 rounded-xl transition-colors shadow"
+              >
+                Vai all'area preventivi →
+              </a>
+              <button onClick={handleNewQuote} className="bg-gray-100 hover:bg-gray-200 text-gray-700 font-semibold py-3 px-6 rounded-xl transition-colors">
+                Nuovo preventivo
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* ── STEP: CONFIRMED ─────────────────────────────────────────────── */}
+        {step === "confirmed" && (
           <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-10 text-center">
             <div className="w-16 h-16 bg-green-100 rounded-full flex items-center justify-center mx-auto mb-4">
               <span className="text-green-600 text-3xl">✓</span>
@@ -745,9 +700,16 @@ export default function QuotingApp({ clientCode, clientName, pricing }: Props) {
               <p>Via Arzignano 10, 36070 Trissino (VI)</p>
               <p>Tel. 0445 491417</p>
             </div>
-            <button onClick={handleNewQuote} className="bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 px-8 rounded-xl transition-colors shadow">
-              Nuovo preventivo
-            </button>
+            <div className="flex flex-col sm:flex-row gap-3 justify-center">
+              {clientCode && (
+                <a href={`/${clientCode}/area`} className="bg-gray-100 hover:bg-gray-200 text-gray-700 font-semibold py-3 px-6 rounded-xl transition-colors">
+                  Area preventivi
+                </a>
+              )}
+              <button onClick={handleNewQuote} className="bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 px-8 rounded-xl transition-colors shadow">
+                Nuovo preventivo
+              </button>
+            </div>
           </div>
         )}
       </main>

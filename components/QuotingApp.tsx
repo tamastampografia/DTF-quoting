@@ -264,7 +264,6 @@ export default function QuotingApp({ clientCode, clientName, pricing, preloadedQ
 
   const handleSendOrder = async () => {
     if (!companyName.trim()) { setError("Inserisci il nome dell'azienda"); return; }
-    if (!allFilesUploaded) { setError("Carica tutti i file grafici prima di inviare"); return; }
     setSubmitting(true);
     setError(null);
     try {
@@ -507,7 +506,6 @@ export default function QuotingApp({ clientCode, clientName, pricing, preloadedQ
                       <th className="text-left px-4 py-3">Soggetto</th>
                       <th className="text-left px-4 py-3">Dimensioni</th>
                       <th className="text-right px-4 py-3">Pezzi</th>
-                      <th className="text-center px-4 py-3">File</th>
                       <th className="text-right px-4 py-3">Prezzo/pz</th>
                       <th className="text-right px-4 py-3">Totale</th>
                     </tr>
@@ -523,17 +521,6 @@ export default function QuotingApp({ clientCode, clientName, pricing, preloadedQ
                         </td>
                         <td className="px-4 py-3 text-gray-600">{s.width} × {s.height} cm</td>
                         <td className="px-4 py-3 text-right text-gray-700">{s.quantity}</td>
-                        <td className="px-4 py-3 text-center">
-                          {subjects[i]?.file ? (
-                            <span className="text-green-600 text-xs font-medium">✓ Caricato</span>
-                          ) : (
-                            <div>
-                              <span className="text-amber-500 text-xs">Non caricato</span>
-                              <input type="file" accept={ACCEPTED_FORMATS} ref={el => { fileInputRefs.current[i] = el; }} onChange={e => handleFileChange(i, e)} className="hidden" />
-                              <button type="button" onClick={() => fileInputRefs.current[i]?.click()} className="ml-2 text-xs text-blue-600 underline">Carica</button>
-                            </div>
-                          )}
-                        </td>
                         <td className="px-4 py-3 text-right font-semibold text-gray-800">{formatCurrency(s.pricePerPiece)}</td>
                         <td className="px-4 py-3 text-right text-gray-800">{formatCurrency(s.totalPrice)}</td>
                       </tr>
@@ -559,17 +546,6 @@ export default function QuotingApp({ clientCode, clientName, pricing, preloadedQ
               <p className="text-xs text-gray-400 mt-3">Spedizione pronta in 48h dall'ordine</p>
             </div>
 
-            {!allFilesUploaded && !isConverting && (
-              <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 text-sm text-amber-700">
-                Per confermare l'ordine devi caricare il file grafica per tutti i soggetti. Puoi anche <strong>salvare il preventivo</strong> ora e caricare i file in seguito.
-              </div>
-            )}
-            {!allFilesUploaded && isConverting && (
-              <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 text-sm text-amber-700">
-                Carica il file grafica per tutti i soggetti prima di inviare l'ordine.
-              </div>
-            )}
-
             {/* Action buttons */}
             <div className="flex flex-col sm:flex-row gap-3">
               {/* Back */}
@@ -577,7 +553,7 @@ export default function QuotingApp({ clientCode, clientName, pricing, preloadedQ
                 onClick={() => isConverting && onBackToArea ? onBackToArea() : setStep(1)}
                 className="sm:flex-1 bg-gray-100 hover:bg-gray-200 text-gray-700 font-semibold py-3 px-5 rounded-xl transition-colors"
               >
-                {isConverting ? "← Torna all'area" : "Modifica soggetti"}
+                {isConverting ? "← Torna all'area" : "← Modifica soggetti"}
               </button>
 
               {/* Save as quote — only for identified clients, not when converting */}
@@ -591,11 +567,10 @@ export default function QuotingApp({ clientCode, clientName, pricing, preloadedQ
                 </button>
               )}
 
-              {/* Confirm order */}
+              {/* Confirm order — always enabled */}
               <button
                 onClick={() => { setError(null); setStep(3); }}
-                disabled={!allFilesUploaded}
-                className={`sm:flex-1 bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 px-5 rounded-xl transition-colors shadow ${!allFilesUploaded ? "opacity-50 cursor-not-allowed" : ""}`}
+                className="sm:flex-1 bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 px-5 rounded-xl transition-colors shadow"
               >
                 {isConverting ? "Procedi all'ordine →" : "Conferma ordine →"}
               </button>
@@ -608,11 +583,33 @@ export default function QuotingApp({ clientCode, clientName, pricing, preloadedQ
           <div className="space-y-4">
             <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
               <h2 className="text-lg font-semibold text-gray-900 mb-4">Dati ordine</h2>
-              <div>
+              <div className="mb-4">
                 <label className="block text-sm font-medium text-gray-700 mb-1">
                   Nome azienda <span className="text-red-500">*</span>
                 </label>
                 <input type="text" value={companyName} onChange={e => setCompanyName(e.target.value)} placeholder="Inserisci il nome della tua azienda" className="w-full border border-gray-300 rounded-lg px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+              </div>
+              {/* File uploads — optional here */}
+              <div>
+                <p className="text-sm font-medium text-gray-700 mb-2">
+                  File grafici <span className="text-gray-400 font-normal">(opzionali — puoi inviarli per email dopo l'ordine)</span>
+                </p>
+                <div className="space-y-2">
+                  {subjects.map((s, i) => (
+                    <div key={i} className="flex items-center gap-3">
+                      <span className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ backgroundColor: getSubjectColor(i) }} />
+                      <span className="text-sm text-gray-700 w-24 truncate">{s.name}</span>
+                      <input type="file" accept={ACCEPTED_FORMATS} ref={el => { fileInputRefs.current[i] = el; }} onChange={e => handleFileChange(i, e)} className="hidden" />
+                      <button type="button" onClick={() => fileInputRefs.current[i]?.click()}
+                        className={`text-sm px-3 py-1.5 rounded-lg border transition-colors ${s.file ? "border-green-400 bg-green-50 text-green-700" : "border-gray-300 bg-white text-gray-500 hover:border-gray-400"}`}>
+                        {s.file ? `✓ ${s.file.name}` : "Carica file…"}
+                      </button>
+                    </div>
+                  ))}
+                </div>
+                {!allFilesUploaded && (
+                  <p className="mt-2 text-xs text-gray-400">Se non carichi i file ora, riceverai una email con le istruzioni per inviarli separatamente.</p>
+                )}
               </div>
             </div>
             <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">

@@ -63,7 +63,8 @@ export async function POST(req: NextRequest) {
 
     // 2. Send email via Resend
     const resendKey = process.env.RESEND_API_KEY;
-    const orderEmail = process.env.ORDER_EMAIL || "edoardo.modini@tamas.it";
+    const orderEmails = (process.env.ORDER_EMAIL || "edoardo.modini@tamas.it")
+      .split(",").map(e => e.trim()).filter(Boolean);
     const fromEmail = process.env.RESEND_FROM_EMAIL || "STAMPOO DTF <onboarding@resend.dev>";
 
     if (resendKey) {
@@ -150,7 +151,7 @@ export async function POST(req: NextRequest) {
 
       await resend.emails.send({
         from: fromEmail,
-        to: [orderEmail],
+        to: orderEmails,
         subject: `Nuovo ordine DTF - ${escapeHtml(payload.companyName)} - ${formatCurrency(payload.quote?.grandTotal ?? 0)}`,
         html,
         attachments,

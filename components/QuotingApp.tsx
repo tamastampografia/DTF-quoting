@@ -180,6 +180,11 @@ export default function QuotingApp({ clientCode, clientName, pricing, onLogout }
     setError(null);
     const err = validateSubjects(subjects);
     if (err) { setError(err); return; }
+    const missingFiles = subjects.filter(s => !s.file).map(s => s.name);
+    if (missingFiles.length > 0) {
+      setError(`Carica il file grafica per: ${missingFiles.join(", ")}`);
+      return;
+    }
     const inputs: SubjectInput[] = subjects.map(s => ({ name: s.name, width: parseFloat(s.width), height: parseFloat(s.height), quantity: parseInt(s.quantity) }));
     setQuote(calculateNesting(inputs, pricing, includeCut, includeShipping, isIslands));
     setStep(2);
@@ -199,14 +204,6 @@ export default function QuotingApp({ clientCode, clientName, pricing, onLogout }
   // ── Send order ───────────────────────────────────────────────────────────
 
   const handleSendOrder = async () => {
-
-    // Check all files are uploaded
-    const missingFiles = subjects.filter(s => !s.file).map(s => s.name);
-    if (missingFiles.length > 0) {
-      setError(`File grafici mancanti per: ${missingFiles.join(", ")}. Carica tutti i file prima di inviare l'ordine.`);
-      return;
-    }
-
     setSubmitting(true);
     setError(null);
     try {
@@ -359,7 +356,7 @@ export default function QuotingApp({ clientCode, clientName, pricing, onLogout }
                         <input type="number" min="1" step="1" value={s.quantity} onChange={e => patchSubject(i, { quantity: e.target.value })} placeholder="es. 50" className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
                       </div>
                       <div>
-                        <label className="block text-xs font-medium text-gray-600 mb-1">File grafica <span className="text-gray-400">(opz.)</span></label>
+                        <label className="block text-xs font-medium text-gray-600 mb-1">File grafica <span className="text-red-500">*</span></label>
                         <input type="file" accept={ACCEPTED_FORMATS} ref={el => { fileInputRefs.current[i] = el; }} onChange={e => handleFileChange(i, e)} className="hidden" />
                         <button type="button" onClick={() => fileInputRefs.current[i]?.click()}
                           className={`w-full border rounded-md px-3 py-2 text-sm text-left truncate ${s.file ? "border-green-400 bg-green-50 text-green-700" : "border-gray-300 bg-white text-gray-500 hover:border-gray-400"}`}>
@@ -494,29 +491,6 @@ export default function QuotingApp({ clientCode, clientName, pricing, onLogout }
         {/* ── STEP 3 ─────────────────────────────────────────────────────── */}
         {step === 3 && quote && (
           <div className="space-y-4">
-            <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
-              <h2 className="text-lg font-semibold text-gray-900 mb-4">Carica file grafici</h2>
-              {/* File uploads — required */}
-              <div>
-                <p className="text-sm font-medium text-gray-700 mb-1">
-                  File grafici <span className="text-red-500">*</span>
-                </p>
-                <p className="text-xs text-gray-500 mb-3">Carica un file per ogni soggetto. Obbligatorio per procedere.</p>
-                <div className="space-y-2">
-                  {subjects.map((s, i) => (
-                    <div key={i} className="flex items-center gap-3">
-                      <span className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ backgroundColor: getSubjectColor(i) }} />
-                      <span className="text-sm text-gray-700 w-24 truncate">{s.name}</span>
-                      <input type="file" accept={ACCEPTED_FORMATS} ref={el => { fileInputRefs.current[i] = el; }} onChange={e => handleFileChange(i, e)} className="hidden" />
-                      <button type="button" onClick={() => fileInputRefs.current[i]?.click()}
-                        className={`text-sm px-3 py-1.5 rounded-lg border transition-colors ${s.file ? "border-green-400 bg-green-50 text-green-700" : "border-red-300 bg-red-50 text-red-500 hover:border-red-400"}`}>
-                        {s.file ? `✓ ${s.file.name}` : "Carica file… (obbligatorio)"}
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            </div>
             <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
               <h2 className="text-lg font-semibold text-gray-900 mb-4">Riepilogo ordine</h2>
               <div className="text-sm text-gray-600 space-y-1 mb-4">

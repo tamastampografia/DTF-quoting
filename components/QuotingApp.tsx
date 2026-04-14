@@ -145,13 +145,20 @@ export default function QuotingApp({ clientCode, clientName, pricing, onLogout }
       if (props.source === "absolute" && props.widthCm && props.heightCm) {
         patchSubject(index, { extracting: false, ratio: props.ratio, lockRatio: true, proportionSource: "absolute", width: String(props.widthCm), height: String(props.heightCm) });
       } else if (props.source === "proportional" && props.ratio > 0) {
-        const s = subjects[index];
-        const existingW = parseFloat(s.width);
-        const existingH = parseFloat(s.height);
-        const patch: Partial<SubjectForm> = { extracting: false, ratio: props.ratio, lockRatio: true, proportionSource: "proportional" };
-        if (!isNaN(existingW) && existingW > 0) patch.height = round1(existingW / props.ratio);
-        else if (!isNaN(existingH) && existingH > 0) patch.width = round1(existingH * props.ratio);
-        patchSubject(index, patch);
+        // Usare functional updater per leggere lo stato fresco dopo l'await
+        // (evita stale closure su subjects[index] per soggetti B, C, ecc.)
+        setSubjects(prev => {
+          const s = prev[index];
+          if (!s) return prev;
+          const existingW = parseFloat(s.width);
+          const existingH = parseFloat(s.height);
+          const updated: SubjectForm = { ...s, extracting: false, ratio: props.ratio, lockRatio: true, proportionSource: "proportional" };
+          if (!isNaN(existingW) && existingW > 0) updated.height = round1(existingW / props.ratio);
+          else if (!isNaN(existingH) && existingH > 0) updated.width = round1(existingH * props.ratio);
+          const next = [...prev];
+          next[index] = updated;
+          return next;
+        });
       } else {
         patchSubject(index, { extracting: false, proportionSource: "none" });
       }

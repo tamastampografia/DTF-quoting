@@ -130,6 +130,8 @@ export default function QuotingApp({ clientCode, clientName, pricing, onLogout }
   const toggleLock = (index: number) => patchSubject(index, { lockRatio: !subjects[index].lockRatio });
 
   // ── File change ──────────────────────────────────────────────────────────
+  // IMPORTANTE: tutte le operazioni sullo stato usano functional updater
+  // (prev => ...) per evitare stale closure su soggetti B, C, D ... H.
 
   const handleFileChange = async (index: number, e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0] ?? null;
@@ -139,32 +141,49 @@ export default function QuotingApp({ clientCode, clientName, pricing, onLogout }
       e.target.value = "";
       return;
     }
-    patchSubject(index, { file, extracting: true, ratio: null, lockRatio: false, proportionSource: null });
+
+    // Fase 1: segna come "in analisi" — functional updater, mai closure
+    setSubjects(prev => {
+      if (index >= prev.length) return prev;
+      const next = [...prev];
+      next[index] = { ...next[index], file, extracting: true, ratio: null, lockRatio: false, proportionSource: null };
+      return next;
+    });
+
+    let result: import("@/lib/extract-proportions").FileProportions;
     try {
-      const props = await extractProportions(file);
-      if (props.source === "absolute" && props.widthCm && props.heightCm) {
-        patchSubject(index, { extracting: false, ratio: props.ratio, lockRatio: true, proportionSource: "absolute", width: String(props.widthCm), height: String(props.heightCm) });
-      } else if (props.source === "proportional" && props.ratio > 0) {
-        // Usare functional updater per leggere lo stato fresco dopo l'await
-        // (evita stale closure su subjects[index] per soggetti B, C, ecc.)
-        setSubjects(prev => {
-          const s = prev[index];
-          if (!s) return prev;
-          const existingW = parseFloat(s.width);
-          const existingH = parseFloat(s.height);
-          const updated: SubjectForm = { ...s, extracting: false, ratio: props.ratio, lockRatio: true, proportionSource: "proportional" };
-          if (!isNaN(existingW) && existingW > 0) updated.height = round1(existingW / props.ratio);
-          else if (!isNaN(existingH) && existingH > 0) updated.width = round1(existingH * props.ratio);
-          const next = [...prev];
-          next[index] = updated;
-          return next;
-        });
-      } else {
-        patchSubject(index, { extracting: false, proportionSource: "none" });
-      }
+      result = await extractProportions(file);
     } catch {
-      patchSubject(index, { extracting: false, proportionSource: "none" });
+      setSubjects(prev => {
+        if (index >= prev.length) return prev;
+        const next = [...prev];
+        next[index] = { ...next[index], extracting: false, proportionSource: "none" };
+        return next;
+      });
+      return;
     }
+
+    // Fase 2: applica il risultato — functional updater, stato sempre fresco
+    setSubjects(prev => {
+      if (index >= prev.length) return prev;
+      const next = [...prev];
+      const s = prev[index];
+
+      if (result.source === "absolute" && result.widthCm && result.heightCm) {
+        next[index] = { ...s, extracting: false, ratio: result.ratio, lockRatio: true, proportionSource: "absolute", width: String(result.widthCm), height: String(result.heightCm) };
+      } else if (result.source === "proportional" && result.ratio > 0) {
+        const existingW = parseFloat(s.width);
+        const existingH = parseFloat(s.height);
+        const updated: SubjectForm = { ...s, extracting: false, ratio: result.ratio, lockRatio: true, proportionSource: "proportional" };
+        if (!isNaN(existingW) && existingW > 0) updated.height = round1(existingW / result.ratio);
+        else if (!isNaN(existingH) && existingH > 0) updated.width = round1(existingH * result.ratio);
+        next[index] = updated;
+      } else {
+        next[index] = { ...s, extracting: false, proportionSource: "none" };
+      }
+
+      return next;
+    });
   };
 
   // ── Subject list ─────────────────────────────────────────────────────────
@@ -378,10 +397,14 @@ export default function QuotingApp({ clientCode, clientName, pricing, onLogout }
                   </div>
                 ))}
               </div>
-              {subjects.length < 8 && (
+              {subjects.length < 8 ? (
                 <button onClick={addSubject} className="mt-4 flex items-center gap-1.5 text-blue-600 hover:text-blue-800 text-sm font-medium">
                   <span className="text-lg leading-none">+</span> Aggiungi soggetto
                 </button>
+              ) : (
+                <p className="mt-4 text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+                  ⚠️ Hai raggiunto il numero massimo di <strong>8 soggetti</strong> per ordine. Per aggiungerne altri, crea un nuovo ordine separato.
+                </p>
               )}
             </div>
             <button onClick={handleCalculate} className="w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 px-6 rounded-xl transition-colors text-base shadow">

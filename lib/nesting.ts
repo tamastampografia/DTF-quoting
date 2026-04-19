@@ -53,7 +53,8 @@ export interface SVGSegment {
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
-export const ROLL_WIDTH_CM = 58;
+export const ROLL_WIDTH_CM = 57;
+export const ROLL_MAX_LENGTH_CM = 300; // max sheet length per print section
 export const GAP_CM = 1; // 0.5 per side
 export const MIN_ROLL_METERS = 0.5;
 export const CUT_PRICE_PER_PIECE = 0.10;

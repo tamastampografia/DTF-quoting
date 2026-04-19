@@ -7,7 +7,8 @@ export interface FileProportions {
   ratio: number;         // width / height
   widthCm?: number;      // absolute dimension if available
   heightCm?: number;     // absolute dimension if available
-  source: "absolute" | "proportional" | "none";
+  /** absolute: exact cm from file | proportional: pixel ratio | raster: pixel-only, not reliable for print | none: no data */
+  source: "absolute" | "proportional" | "raster" | "none";
 }
 
 const POINTS_TO_CM = 0.0352778; // 1pt = 0.3528mm = 0.03528cm
@@ -32,17 +33,16 @@ export async function extractProportions(file: File): Promise<FileProportions> {
     if (ext === "eps") {
       return await extractFromEps(file);
     }
-    if (ext === "png" || mime === "image/png") {
-      return await extractFromPng(file);
-    }
-    if (ext === "jpg" || ext === "jpeg" || mime === "image/jpeg") {
-      return await extractFromJpg(file);
-    }
-    if (ext === "tif" || ext === "tiff" || mime === "image/tiff") {
-      return await extractFromTiff(file);
-    }
-    if (ext === "psd") {
-      return await extractFromPsd(file);
+    // Raster formats: pixel dimensions are NOT reliable for print sizing.
+    // Return "raster" so the UI can warn the user to enter dimensions manually.
+    if (
+      ext === "png" || mime === "image/png" ||
+      ext === "jpg" || ext === "jpeg" || mime === "image/jpeg" ||
+      ext === "tif" || ext === "tiff" || mime === "image/tiff" ||
+      ext === "psd" ||
+      ext === "bmp" || mime === "image/bmp"
+    ) {
+      return { ratio: 1, source: "raster" };
     }
     // CDR and unknowns: no extraction
     return { ratio: 1, source: "none" };

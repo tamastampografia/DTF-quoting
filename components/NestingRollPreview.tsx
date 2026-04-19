@@ -2,8 +2,8 @@
 
 import React from "react";
 import type { SVGColumnData, NestingResult } from "@/lib/nesting";
-import { ROLL_WIDTH_CM } from "@/lib/nesting";
-import { getSubjectColor, getSubjectName } from "@/lib/utils";
+import { ROLL_WIDTH_CM, ROLL_MAX_LENGTH_CM, GAP_CM } from "@/lib/nesting";
+import { getSubjectColor } from "@/lib/utils";
 
 interface Props {
   result: NestingResult;
@@ -67,34 +67,53 @@ export default function NestingRollPreview({ result, subjectNames }: Props) {
           </g>
         ))}
 
-        {/* Column rectangles */}
+        {/* Column rectangles — one rect per piece */}
         {cols.map((col, ci) => {
           const color = getSubjectColor(col.subjectIndex);
           const colX = PADDING + col.x * SCALE;
           const colW = col.colWidth * SCALE;
 
           return col.segments.map((seg, si) => {
-            const segH = seg.height * SCALE;
-            const segY = LABEL_AREA_HEIGHT + PADDING + seg.y * SCALE;
+            const pieceH = seg.height * SCALE;
+            const gapH = GAP_CM * SCALE;
+            const segOriginY = LABEL_AREA_HEIGHT + PADDING + seg.y * SCALE;
+            const totalSegH = seg.count * pieceH + (seg.count - 1) * gapH;
+            // Only draw individual pieces when they are tall enough to be visible (>= 3px)
+            const drawIndividual = pieceH >= 3;
 
             return (
               <g key={`${ci}-${si}`}>
-                {/* Piece rectangle */}
-                <rect
-                  x={colX}
-                  y={segY}
-                  width={colW}
-                  height={segH * seg.count}
-                  fill={color}
-                  fillOpacity={0.6}
-                  stroke={color}
-                  strokeWidth={0.5}
-                />
-                {/* Label */}
-                {segH * seg.count > 14 && (
+                {drawIndividual
+                  ? Array.from({ length: seg.count }, (_, k) => (
+                      <rect
+                        key={k}
+                        x={colX}
+                        y={segOriginY + k * (pieceH + gapH)}
+                        width={colW}
+                        height={pieceH}
+                        fill={color}
+                        fillOpacity={0.65}
+                        stroke={color}
+                        strokeWidth={0.5}
+                      />
+                    ))
+                  : /* Too small to draw individually — merge into a single block */
+                    <rect
+                      x={colX}
+                      y={segOriginY}
+                      width={colW}
+                      height={totalSegH}
+                      fill={color}
+                      fillOpacity={0.65}
+                      stroke={color}
+                      strokeWidth={0.5}
+                    />
+                }
+                {/* Label on first piece (if big enough) */}
+                {pieceH >= 14 && (
                   <text
                     x={colX + colW / 2}
-                    y={segY + Math.min(segH * seg.count / 2, 10)}
+                    y={segOriginY + pieceH / 2}
                     fontSize={9}
                     fill="#fff"
                     textAnchor="middle"
@@ -108,6 +127,32 @@ export default function NestingRollPreview({ result, subjectNames }: Props) {
             );
           });
         })}
+
+        {/* Section boundary lines every ROLL_MAX_LENGTH_CM cm */}
+        {Array.from(
+          { length: Math.floor(rollLengthCm / ROLL_MAX_LENGTH_CM) },
+          (_, i) => (i + 1) * ROLL_MAX_LENGTH_CM
+        ).map(cm => (
+          <g key={`sec-${cm}`}>
+            <line
+              x1={PADDING}
+              y1={LABEL_AREA_HEIGHT + PADDING + cm * SCALE}
+              x2={PADDING + ROLL_WIDTH_CM * SCALE}
+              y2={LABEL_AREA_HEIGHT + PADDING + cm * SCALE}
+              stroke="#3B82F6"
+              strokeWidth={1.5}
+              strokeDasharray="6,3"
+            />
+            <text
+              x={PADDING + ROLL_WIDTH_CM * SCALE + 4}
+              y={LABEL_AREA_HEIGHT + PADDING + cm * SCALE + 4}
+              fontSize={8}
+              fill="#3B82F6"
+            >
+              {cm / 100} m
+            </text>
+          </g>
+        ))}
 
         {/* Column width markers at top */}
         {Array.from(new Set(cols.map(c => c.x))).map(x => {

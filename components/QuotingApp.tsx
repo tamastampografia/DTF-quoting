@@ -178,6 +178,9 @@ export default function QuotingApp({ clientCode, clientName, pricing, onLogout }
         if (!isNaN(existingW) && existingW > 0) updated.height = round1(existingW / result.ratio);
         else if (!isNaN(existingH) && existingH > 0) updated.width = round1(existingH * result.ratio);
         next[index] = updated;
+      } else if (result.source === "raster") {
+        // File raster: non proponiamo dimensioni, solo avvisiamo l'utente
+        next[index] = { ...s, extracting: false, ratio: null, lockRatio: false, proportionSource: "raster" };
       } else {
         next[index] = { ...s, extracting: false, proportionSource: "none" };
       }
@@ -289,6 +292,7 @@ export default function QuotingApp({ clientCode, clientName, pricing, onLogout }
             <p className="text-sm text-gray-500">Transfer DTF — Preventivo online</p>
           </div>
           <div className="flex items-center gap-3">
+            <span className="text-xs font-bold text-orange-600 bg-orange-50 border border-orange-200 px-2 py-0.5 rounded-full tracking-wide">versione BETA</span>
             {(pricing.type === "fixed" || pricing.type === "discount") && (
               <span className="bg-green-100 text-green-800 text-sm font-semibold px-3 py-1 rounded-full border border-green-200">
                 {pricing.type === "fixed" ? `Prezzo riservato: ${formatCurrency(pricing.value)}/m` : `Sconto riservato: -${pricing.value}%`}
@@ -339,7 +343,7 @@ export default function QuotingApp({ clientCode, clientName, pricing, onLogout }
             <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
               <h2 className="text-lg font-semibold text-gray-900 mb-4">Inserisci i soggetti</h2>
               <p className="text-sm text-gray-500 mb-6">
-                Larghezza massima rullo: <strong>58 cm</strong> — Ordine minimo: <strong>50 cm</strong> di rullo
+                Larghezza massima rullo: <strong>57 cm</strong> — Ordine minimo: <strong>50 cm</strong> di rullo
               </p>
               <div className="space-y-4">
                 {subjects.map((s, i) => (
@@ -350,10 +354,13 @@ export default function QuotingApp({ clientCode, clientName, pricing, onLogout }
                         <span className="font-semibold text-gray-800">{s.name}</span>
                         {s.extracting && <span className="text-xs text-blue-500 animate-pulse">Lettura file…</span>}
                         {!s.extracting && s.proportionSource === "absolute" && (
-                          <span className="text-xs text-green-600 bg-green-50 border border-green-200 px-1.5 py-0.5 rounded">Dimensioni rilevate dal file</span>
+                          <span className="text-xs text-green-600 bg-green-50 border border-green-200 px-1.5 py-0.5 rounded">✓ Dimensioni rilevate dal file</span>
                         )}
                         {!s.extracting && s.proportionSource === "proportional" && (
                           <span className="text-xs text-blue-600 bg-blue-50 border border-blue-200 px-1.5 py-0.5 rounded">Proporzioni rilevate</span>
+                        )}
+                        {!s.extracting && s.proportionSource === "raster" && (
+                          <span className="text-xs text-orange-600 bg-orange-50 border border-orange-200 px-1.5 py-0.5 rounded">File raster</span>
                         )}
                       </div>
                       {subjects.length > 1 && (
@@ -391,8 +398,21 @@ export default function QuotingApp({ clientCode, clientName, pricing, onLogout }
                         <p className="text-xs text-gray-400 mt-1">PDF, AI, SVG, PNG, JPG… max 20MB</p>
                       </div>
                     </div>
+                    {/* Messaggio: inserisci una dimensione */}
                     {!s.extracting && s.proportionSource === "proportional" && s.ratio !== null && !s.width && !s.height && (
                       <p className="mt-2 text-xs text-blue-600">Inserisci larghezza o altezza — l'altra verrà calcolata automaticamente</p>
+                    )}
+                    {/* Messaggio: verifica dimensioni rilevate automaticamente */}
+                    {!s.extracting && (s.proportionSource === "absolute" || (s.proportionSource === "proportional" && (s.width || s.height))) && (
+                      <p className="mt-2 text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-1">
+                        ⚠️ Verifica che larghezza e altezza corrispondano alle dimensioni reali di stampa desiderate e correggile se necessario.
+                      </p>
+                    )}
+                    {/* Messaggio: file raster, nessuna dimensione proposta */}
+                    {!s.extracting && s.proportionSource === "raster" && (
+                      <p className="mt-2 text-xs text-orange-700 bg-orange-50 border border-orange-200 rounded px-2 py-1">
+                        ⚠️ File raster (PNG/JPG/TIFF/PSD): le dimensioni in pixel non corrispondono necessariamente alle dimensioni di stampa. Inserisci larghezza e altezza in cm manualmente.
+                      </p>
                     )}
                   </div>
                 ))}

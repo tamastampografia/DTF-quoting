@@ -10,7 +10,9 @@ interface Props {
   subjectNames?: string[];
 }
 
-const SCALE = 4; // px per cm
+const MAX_SCALE = 4;        // max px per cm (for short rolls)
+const MIN_SCALE = 0.5;      // min px per cm (for very long rolls)
+const TARGET_HEIGHT = 1400; // target SVG height in px
 const LABEL_AREA_HEIGHT = 30;
 const PADDING = 16;
 
@@ -18,7 +20,9 @@ export default function NestingRollPreview({ result, subjectNames }: Props) {
   if (!result || result.subjects.length === 0) return null;
 
   const rollLengthCm = result.totalRollMeters * 100;
-  const svgWidth = ROLL_WIDTH_CM * SCALE + PADDING * 2;
+  // Auto-scale: shrink for long rolls so the preview stays usable
+  const SCALE = Math.max(MIN_SCALE, Math.min(MAX_SCALE, TARGET_HEIGHT / Math.max(1, rollLengthCm)));
+  const svgWidth = ROLL_WIDTH_CM * SCALE + PADDING * 2 + 40; // +40 for section labels
   const svgHeight = rollLengthCm * SCALE + LABEL_AREA_HEIGHT + PADDING * 2;
 
   // Build column data from result

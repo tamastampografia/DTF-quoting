@@ -1,15 +1,18 @@
 // ─── Types ───────────────────────────────────────────────────────────────────
 
+export type SubjectType = "single" | "precomposed";
+
 export interface SubjectInput {
   name: string;
-  width: number;   // cm
-  height: number;  // cm
+  width: number;    // cm
+  height: number;   // cm
   quantity: number;
+  type: SubjectType;
 }
 
 export interface ClientPricing {
   type: "standard" | "fixed" | "discount";
-  value: number; // fixed $/m or discount %
+  value: number;
 }
 
 export interface SubjectResult {
@@ -17,11 +20,11 @@ export interface SubjectResult {
   width: number;
   height: number;
   quantity: number;
-  rotated: boolean;
-  effectiveWidth: number;
-  effectiveHeight: number;
+  type: SubjectType;
+  portraitColumns: number;
+  landscapeColumns: number;
   columns: number;
-  rollLength: number;    // meters of roll used by this subject
+  rollLength: number;    // meters — this subject's section only
   pricePerPiece: number;
   totalPrice: number;
 }
@@ -35,27 +38,30 @@ export interface NestingResult {
   shippingPrice: number;
   grandTotal: number;
   svgPreviewData: SVGColumnData[];
+  subjectSectionStarts: number[]; // cm from top where each subject's section begins
 }
 
 export interface SVGColumnData {
   subjectName: string;
   subjectIndex: number;
-  x: number;        // px from left of roll
-  colWidth: number; // cm
+  x: number;           // cm from left edge of roll
+  colWidth: number;    // cm
+  orientation: "portrait" | "landscape";
   segments: SVGSegment[];
 }
 
 export interface SVGSegment {
-  y: number;     // cm from top
-  height: number; // cm
-  count: number;
+  y: number;      // cm from top of roll
+  height: number; // cm — piece height in this orientation
+  count: number;  // number of rows in this column
 }
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
 export const ROLL_WIDTH_CM = 57;
-export const ROLL_MAX_LENGTH_CM = 300; // max sheet length per print section
-export const GAP_CM = 1; // 0.5 per side
+export const ROLL_MAX_LENGTH_CM = 300;    // visual section boundary every 300 cm
+export const GAP_CM = 1;                  // gap between pieces (0.5 cm per side)
+export const INTER_SUBJECT_GAP_CM = 10;  // gap between subject sections on the roll
 export const MIN_ROLL_METERS = 0.5;
 export const CUT_PRICE_PER_PIECE = 0.10;
 export const SHIPPING_PRICE = 10.00;
@@ -68,28 +74,14 @@ export const STANDARD_TIERS: Array<{ minMeters: number; maxMeters: number | null
   { minMeters: 0,   maxMeters: 0.5,  pricePerMeter: 20.00 },
   { minMeters: 0.5, maxMeters: 1,    pricePerMeter: 12.00 },
   { minMeters: 1,   maxMeters: 2,    pricePerMeter: 11.50 },
-  { minMeters: 2,   maxMeters: 4,    pricePerMeter: 11.00 },  // 2-3m
-  { minMeters: 4,   maxMeters: 10,   pricePerMeter: 11.00 },  // 4-9m
-  { minMeters: 10,  maxMeters: 25,   pricePerMeter: 10.50 }, // 10-24m
-  { minMeters: 25,  maxMeters: 50,   pricePerMeter: 10.00 }, // 25-49m
-  { minMeters: 50,  maxMeters: 100,  pricePerMeter: 9.00 },  // 50-99m
-  { minMeters: 100, maxMeters: null, pricePerMeter: 8.50 },  // 100+m
+  { minMeters: 2,   maxMeters: 4,    pricePerMeter: 11.00 },
+  { minMeters: 4,   maxMeters: 10,   pricePerMeter: 11.00 },
+  { minMeters: 10,  maxMeters: 25,   pricePerMeter: 10.50 },
+  { minMeters: 25,  maxMeters: 50,   pricePerMeter: 10.00 },
+  { minMeters: 50,  maxMeters: 100,  pricePerMeter: 9.00  },
+  { minMeters: 100, maxMeters: null, pricePerMeter: 8.50  },
 ];
 
-// Tier table as per spec (bracket applies to entire order)
-const PRICE_BRACKETS = [
-  { upTo: 0.5,  price: 20.00 },
-  { upTo: 1,    price: 12.00 },
-  { upTo: 2,    price: 11.50 }, // 1-2
-  { upTo: 4,    price: 11.00 }, // 2-3 → use 4 as cutoff (spec says 2-3m €11.50, 4-9m €11.00)
-  { upTo: 10,   price: 11.00 }, // 4-9
-  { upTo: 25,   price: 10.50 }, // 10-24
-  { upTo: 50,   price: 10.00 }, // 25-49
-  { upTo: 100,  price: 9.00 },  // 50-99
-  { upTo: Infinity, price: 8.50 }, // 100+
-];
-
-// Correct tier lookup matching the spec exactly
 export function getStandardPricePerMeter(meters: number): number {
   if (meters <= 0.5) return 20.00;
   if (meters <= 1)   return 12.00;
@@ -103,117 +95,92 @@ export function getStandardPricePerMeter(meters: number): number {
 
 export function getPricePerMeter(meters: number, pricing: ClientPricing): number {
   const standard = getStandardPricePerMeter(meters);
-  if (pricing.type === "fixed") return pricing.value;
+  if (pricing.type === "fixed")    return pricing.value;
   if (pricing.type === "discount") return standard * (1 - pricing.value / 100);
   return standard;
 }
 
-// ─── Nesting algorithm ───────────────────────────────────────────────────────
+// ─── Single-subject section layout ───────────────────────────────────────────
 
-interface SubjectOriented {
-  index: number;
-  name: string;
-  quantity: number;
-  effectiveWidth: number;
-  effectiveHeight: number;
-  rotated: boolean;
+interface SectionLayout {
+  portraitCols: number;
+  landscapeCols: number;
+  rowsPortrait: number;   // rows per portrait column
+  rowsLandscape: number;  // rows per landscape column
+  sectionHeightCm: number;
 }
 
-function colWidthFor(ew: number): number {
-  return ew + GAP_CM;
-}
+/**
+ * For a logo of W×H cm printed Q times, find the column mix
+ * (portrait and/or landscape) that minimises total section height
+ * while fitting within ROLL_WIDTH_CM.
+ *
+ * Portrait column : W cm wide, piece height = H cm.
+ * Landscape column: H cm wide, piece height = W cm.
+ */
+function nestSingleSubject(W: number, H: number, Q: number): SectionLayout {
+  let best: SectionLayout | null = null;
 
-// For a given ordered list of column widths (one per column slot),
-// return total roll length in cm and per-subject roll usage (cm)
-function computeRollLength(
-  subjects: SubjectOriented[],
-  colAssignments: number[][] // colAssignments[subjectIdx] = array of column indices assigned
-): { rollLengthCm: number; subjectLengthsCm: number[] } {
-  // Each column accumulates height from subjects assigned to it
-  // We need to figure out total column height
-  // For each column, compute the stacked height
-  const columnHeights: Map<number, number> = new Map();
+  // Landscape only helps when logo is not square and H fits in roll width.
+  const canLandscape = Math.abs(H - W) > 0.01 && H + GAP_CM <= ROLL_WIDTH_CM + 0.001;
 
-  subjects.forEach((s, si) => {
-    const cols = colAssignments[si];
-    if (!cols || cols.length === 0) return;
-    const numCols = cols.length;
-    const rowsPerCol = Math.ceil(s.quantity / numCols);
-    const colHeight = rowsPerCol * (s.effectiveHeight + GAP_CM);
-    cols.forEach(ci => {
-      columnHeights.set(ci, (columnHeights.get(ci) ?? 0) + colHeight);
-    });
-  });
+  const portraitColW  = W + GAP_CM;
+  const landscapeColW = H + GAP_CM;
+  const maxNp = portraitColW <= ROLL_WIDTH_CM
+    ? Math.floor(ROLL_WIDTH_CM / portraitColW)
+    : 0;
 
-  const rollLengthCm = Math.max(0, ...Array.from(columnHeights.values()));
+  for (let np = 0; np <= maxNp; np++) {
+    const usedW      = np * portraitColW;
+    const remainingW = ROLL_WIDTH_CM - usedW;
+    const maxNl      = canLandscape && landscapeColW <= remainingW + 0.001
+      ? Math.floor((remainingW + 0.001) / landscapeColW)
+      : 0;
 
-  // Per-subject contribution: proportion of their column slots height vs total
-  const subjectLengthsCm = subjects.map((s, si) => {
-    const cols = colAssignments[si];
-    if (!cols || cols.length === 0) return 0;
-    const numCols = cols.length;
-    const rowsPerCol = Math.ceil(s.quantity / numCols);
-    return numCols * rowsPerCol * (s.effectiveHeight + GAP_CM);
-  });
+    for (let nl = 0; nl <= maxNl; nl++) {
+      if (np === 0 && nl === 0) continue;
 
-  return { rollLengthCm, subjectLengthsCm };
-}
+      let rowsP = 0, rowsL = 0, sectionH: number;
 
-// Try a specific orientation combo and find best column layout
-function tryOrientations(
-  subjects: SubjectOriented[],
-): { rollLengthCm: number; subjectLengthsCm: number[]; colAssignments: number[][]; totalColWidthCm: number } | null {
-  // Group subjects by effective column width
-  const widthGroups: Map<number, number[]> = new Map();
-  subjects.forEach((s, i) => {
-    const cw = colWidthFor(s.effectiveWidth);
-    if (!widthGroups.has(cw)) widthGroups.set(cw, []);
-    widthGroups.get(cw)!.push(i);
-  });
-
-  const groupKeys = Array.from(widthGroups.keys());
-  const n = groupKeys.length;
-
-  // For each group, try 1..N columns where total fits in roll
-  // Enumerate via recursion
-  let best: { rollLengthCm: number; subjectLengthsCm: number[]; colAssignments: number[][]; totalColWidthCm: number } | null = null;
-
-  function enumerate(gi: number, usedWidth: number, colCounts: number[], nextColIdx: number) {
-    if (gi === n) {
-      // Build colAssignments
-      const colAssignments: number[][] = subjects.map(() => []);
-      let ci = 0;
-      groupKeys.forEach((cw, gIdx) => {
-        const subjectIndices = widthGroups.get(cw)!;
-        const numCols = colCounts[gIdx];
-        const assignedCols = Array.from({ length: numCols }, (_, j) => ci + j);
-        ci += numCols;
-        // Distribute subjects of this group across the assigned columns
-        subjectIndices.forEach(si => {
-          colAssignments[si] = assignedCols;
-        });
-      });
-
-      const { rollLengthCm, subjectLengthsCm } = computeRollLength(subjects, colAssignments);
-      if (best === null || rollLengthCm < best.rollLengthCm) {
-        best = { rollLengthCm, subjectLengthsCm, colAssignments, totalColWidthCm: usedWidth };
+      if (np === 0) {
+        // All landscape
+        rowsL    = Math.ceil(Q / nl);
+        sectionH = rowsL * (W + GAP_CM); // landscape piece height = original W
+      } else if (nl === 0) {
+        // All portrait
+        rowsP    = Math.ceil(Q / np);
+        sectionH = rowsP * (H + GAP_CM);
+      } else {
+        // Mixed: iterate rowsP to find the split that minimises section height
+        const maxRowsP = Math.ceil(Q / np);
+        let bestH = Infinity;
+        for (let rp = 0; rp <= maxRowsP; rp++) {
+          const piecesPortrait  = rp * np;
+          const piecesRemaining = Q - piecesPortrait;
+          const rl = piecesRemaining <= 0 ? 0 : Math.ceil(piecesRemaining / nl);
+          if (piecesPortrait + rl * nl < Q) continue; // all Q must be covered
+          const h = Math.max(rp * (H + GAP_CM), rl * (W + GAP_CM));
+          if (h < bestH) { bestH = h; rowsP = rp; rowsL = rl; }
+        }
+        sectionH = bestH;
       }
-      return;
-    }
 
-    const cw = groupKeys[gi];
-    const maxCols = Math.floor((ROLL_WIDTH_CM - usedWidth) / cw);
-    if (maxCols < 1) return; // doesn't fit
-
-    for (let nc = 1; nc <= maxCols; nc++) {
-      colCounts[gi] = nc;
-      enumerate(gi + 1, usedWidth + nc * cw, colCounts, nextColIdx + nc);
+      if (best === null || sectionH < best.sectionHeightCm) {
+        best = { portraitCols: np, landscapeCols: nl, rowsPortrait: rowsP, rowsLandscape: rowsL, sectionHeightCm: sectionH };
+      }
     }
   }
 
-  enumerate(0, 0, new Array(n).fill(1), 0);
+  // Fallback — should not be reached if W ≤ ROLL_WIDTH_CM
+  if (!best) {
+    const rp = Math.ceil(Q / 1);
+    return { portraitCols: 1, landscapeCols: 0, rowsPortrait: rp, rowsLandscape: 0, sectionHeightCm: rp * (H + GAP_CM) };
+  }
+
   return best;
 }
+
+// ─── Main entry point ─────────────────────────────────────────────────────────
 
 export function calculateNesting(
   inputs: SubjectInput[],
@@ -222,120 +189,76 @@ export function calculateNesting(
   includeShipping: boolean,
   isIslands: boolean = false
 ): NestingResult {
-  if (inputs.length === 0) {
-    return {
-      subjects: [],
-      totalRollMeters: 0,
-      pricePerMeter: 0,
-      totalPrintPrice: 0,
-      cutPrice: 0,
-      shippingPrice: 0,
-      grandTotal: 0,
-      svgPreviewData: [],
-    };
-  }
+  const empty: NestingResult = {
+    subjects: [], totalRollMeters: 0, pricePerMeter: 0,
+    totalPrintPrice: 0, cutPrice: 0, shippingPrice: 0, grandTotal: 0,
+    svgPreviewData: [], subjectSectionStarts: [],
+  };
+  if (inputs.length === 0) return empty;
 
-  const n = inputs.length;
-  // Try all 2^n orientation combinations
-  const totalCombos = 1 << n;
-  let bestResult: {
-    rollLengthCm: number;
-    subjectLengthsCm: number[];
-    colAssignments: number[][];
-    oriented: SubjectOriented[];
-  } | null = null;
+  // 1. Find optimal column layout for each subject independently
+  const sections: SectionLayout[] = inputs.map(inp =>
+    nestSingleSubject(inp.width, inp.height, inp.quantity)
+  );
 
-  for (let mask = 0; mask < totalCombos; mask++) {
-    const oriented: SubjectOriented[] = inputs.map((inp, i) => {
-      const rotated = !!(mask & (1 << i));
-      return {
-        index: i,
-        name: inp.name,
-        quantity: inp.quantity,
-        effectiveWidth: rotated ? inp.height : inp.width,
-        effectiveHeight: rotated ? inp.width : inp.height,
-        rotated,
-      };
-    });
+  // 2. Total roll length = Σ section heights + 10 cm gap between each pair
+  const totalSectionHeightCm = sections.reduce((s, sec) => s + sec.sectionHeightCm, 0);
+  const gapTotalCm            = (inputs.length - 1) * INTER_SUBJECT_GAP_CM;
+  const totalLengthCm         = totalSectionHeightCm + gapTotalCm;
 
-    // Check if all subjects fit at minimum 1 column each
-    const minWidth = oriented.reduce((sum, s) => sum + colWidthFor(s.effectiveWidth), 0);
-    if (minWidth > ROLL_WIDTH_CM) continue;
-
-    const result = tryOrientations(oriented);
-    if (!result) continue;
-
-    if (bestResult === null || result.rollLengthCm < bestResult.rollLengthCm) {
-      bestResult = {
-        rollLengthCm: result.rollLengthCm,
-        subjectLengthsCm: result.subjectLengthsCm,
-        colAssignments: result.colAssignments,
-        oriented,
-      };
-    }
-  }
-
-  if (!bestResult) {
-    // Fallback: each subject in a single column, no rotation, stacked vertically
-    const oriented = inputs.map((inp, i) => ({
-      index: i, name: inp.name, quantity: inp.quantity,
-      effectiveWidth: inp.width, effectiveHeight: inp.height, rotated: false,
-    }));
-    const colAssignments = oriented.map((_, i) => [i]);
-    const { rollLengthCm, subjectLengthsCm } = computeRollLength(oriented, colAssignments);
-    bestResult = { rollLengthCm, subjectLengthsCm, colAssignments, oriented };
-  }
-
-  // Convert cm to meters, apply minimum, then always round up to nearest 0.5m
-  const rawMeters = bestResult.rollLengthCm / 100;
-  const clampedMeters = Math.max(MIN_ROLL_METERS, rawMeters);
+  // Round up to nearest 0.5 m, enforce minimum
+  const rawMeters       = totalLengthCm / 100;
+  const clampedMeters   = Math.max(MIN_ROLL_METERS, rawMeters);
   const totalRollMeters = Math.ceil(clampedMeters / 0.5) * 0.5;
 
   const pricePerMeter = getPricePerMeter(totalRollMeters, pricing);
-  const totalArea = bestResult.subjectLengthsCm.reduce((a, b) => a + b, 0);
 
-  // Build subjects results
-  const subjects: SubjectResult[] = bestResult.oriented.map((s, i) => {
-    const proportion = totalArea > 0 ? bestResult!.subjectLengthsCm[i] / totalArea : 1 / n;
+  // 3. Distribute cost proportionally by section height
+  const subjects: SubjectResult[] = inputs.map((inp, i) => {
+    const section    = sections[i];
+    const proportion = totalSectionHeightCm > 0
+      ? section.sectionHeightCm / totalSectionHeightCm
+      : 1 / inputs.length;
     const subjectRollMeters = proportion * totalRollMeters;
-    const totalPrice = subjectRollMeters * pricePerMeter;
-    const pricePerPiece = s.quantity > 0 ? totalPrice / s.quantity : 0;
-    const numCols = bestResult!.colAssignments[i]?.length ?? 1;
-    const rowsPerCol = Math.ceil(s.quantity / numCols);
-    const rollLengthM = (rowsPerCol * numCols * (s.effectiveHeight + GAP_CM)) / 100;
+    const totalPrice        = subjectRollMeters * pricePerMeter;
+    const pricePerPiece     = inp.quantity > 0 ? totalPrice / inp.quantity : 0;
 
     return {
-      name: s.name,
-      width: inputs[i].width,
-      height: inputs[i].height,
-      quantity: s.quantity,
-      rotated: s.rotated,
-      effectiveWidth: s.effectiveWidth,
-      effectiveHeight: s.effectiveHeight,
-      columns: numCols,
-      rollLength: rollLengthM,
+      name: inp.name,
+      width: inp.width,
+      height: inp.height,
+      quantity: inp.quantity,
+      type: inp.type,
+      portraitColumns: section.portraitCols,
+      landscapeColumns: section.landscapeCols,
+      columns: section.portraitCols + section.landscapeCols,
+      rollLength: section.sectionHeightCm / 100,
       pricePerPiece,
       totalPrice,
     };
   });
 
   const totalPrintPrice = subjects.reduce((sum, s) => sum + s.totalPrice, 0);
-  const cutPrice = includeCut ? inputs.reduce((sum, inp) => sum + inp.quantity * CUT_PRICE_PER_PIECE, 0) : 0;
+
+  // Cut applies only to "single" subjects (precomposed files cannot be cut individually)
+  const cutPrice = includeCut
+    ? inputs
+        .filter(inp => inp.type === "single")
+        .reduce((sum, inp) => sum + inp.quantity * CUT_PRICE_PER_PIECE, 0)
+    : 0;
 
   let shippingPrice = 0;
   if (includeShipping) {
-    const baseForShipping = totalPrintPrice + cutPrice;
-    if (baseForShipping >= FREE_SHIPPING_THRESHOLD) {
-      shippingPrice = 0;
-    } else {
-      shippingPrice = isIslands ? SHIPPING_ISLANDS_PRICE : SHIPPING_PRICE;
-    }
+    const base = totalPrintPrice + cutPrice;
+    shippingPrice = base >= FREE_SHIPPING_THRESHOLD
+      ? 0
+      : isIslands ? SHIPPING_ISLANDS_PRICE : SHIPPING_PRICE;
   }
 
   const grandTotal = totalPrintPrice + cutPrice + shippingPrice;
 
-  // Build SVG preview data
-  const svgPreviewData = buildSVGPreviewData(bestResult.oriented, bestResult.colAssignments);
+  // 4. Build SVG preview data
+  const { svgPreviewData, subjectSectionStarts } = buildSVGPreviewData(inputs, sections);
 
   return {
     subjects,
@@ -346,67 +269,62 @@ export function calculateNesting(
     shippingPrice,
     grandTotal,
     svgPreviewData,
+    subjectSectionStarts,
   };
 }
 
-// ─── SVG Preview data builder ─────────────────────────────────────────────────
+// ─── SVG preview builder ──────────────────────────────────────────────────────
 
 function buildSVGPreviewData(
-  oriented: SubjectOriented[],
-  colAssignments: number[][]
-): SVGColumnData[] {
-  // Build a map: colIdx -> list of (subjectIdx, effectiveWidth, effectiveHeight, quantity)
-  const colMap: Map<number, { si: number; s: SubjectOriented }[]> = new Map();
-  oriented.forEach((s, si) => {
-    colAssignments[si]?.forEach(ci => {
-      if (!colMap.has(ci)) colMap.set(ci, []);
-      colMap.get(ci)!.push({ si, s });
-    });
-  });
+  inputs: SubjectInput[],
+  sections: SectionLayout[]
+): { svgPreviewData: SVGColumnData[]; subjectSectionStarts: number[] } {
+  const svgPreviewData: SVGColumnData[]  = [];
+  const subjectSectionStarts: number[]   = [];
+  let yCm = 0;
 
-  // Sort columns
-  const sortedCols = Array.from(colMap.entries()).sort((a, b) => a[0] - b[0]);
+  for (let si = 0; si < inputs.length; si++) {
+    const inp    = inputs[si];
+    const layout = sections[si];
+    const W      = inp.width;
+    const H      = inp.height;
 
-  // Compute x positions
-  const result: SVGColumnData[] = [];
-  let xCm = 0;
+    subjectSectionStarts.push(yCm);
+    let xCm = 0;
 
-  sortedCols.forEach(([ci, entries]) => {
-    // All entries in same column have same width (by design)
-    const colWidth = entries[0].s.effectiveWidth;
-    const colWidthWithGap = colWidth + GAP_CM;
+    // Portrait columns
+    for (let ci = 0; ci < layout.portraitCols; ci++) {
+      svgPreviewData.push({
+        subjectName: inp.name,
+        subjectIndex: si,
+        x: xCm,
+        colWidth: W,
+        orientation: "portrait",
+        segments: [{ y: yCm, height: H, count: layout.rowsPortrait }],
+      });
+      xCm += W + GAP_CM;
+    }
 
-    // Stack segments vertically
-    let yCm = 0;
-    entries.forEach(({ si, s }) => {
-      const numCols = colAssignments[si]?.length ?? 1;
-      const rowsPerCol = Math.ceil(s.quantity / numCols);
+    // Landscape columns (column width = H, piece height = W)
+    for (let ci = 0; ci < layout.landscapeCols; ci++) {
+      svgPreviewData.push({
+        subjectName: inp.name,
+        subjectIndex: si,
+        x: xCm,
+        colWidth: H,
+        orientation: "landscape",
+        segments: [{ y: yCm, height: W, count: layout.rowsLandscape }],
+      });
+      xCm += H + GAP_CM;
+    }
 
-      const existingCol = result.find(c => c.subjectIndex === si && c.x === xCm);
-      if (!existingCol) {
-        result.push({
-          subjectName: s.name,
-          subjectIndex: si,
-          x: xCm,
-          colWidth: colWidth,
-          segments: [{
-            y: yCm,
-            height: s.effectiveHeight,
-            count: rowsPerCol,
-          }],
-        });
-      } else {
-        existingCol.segments.push({
-          y: yCm,
-          height: s.effectiveHeight,
-          count: rowsPerCol,
-        });
-      }
-      yCm += rowsPerCol * (s.effectiveHeight + GAP_CM);
-    });
+    yCm += layout.sectionHeightCm;
 
-    xCm += colWidthWithGap;
-  });
+    // Add inter-subject gap (not after the last subject)
+    if (si < inputs.length - 1) {
+      yCm += INTER_SUBJECT_GAP_CM;
+    }
+  }
 
-  return result;
+  return { svgPreviewData, subjectSectionStarts };
 }

@@ -2,7 +2,7 @@
 
 import React, { useState, useRef, useCallback } from "react";
 import { calculateNesting } from "@/lib/nesting";
-import type { NestingResult, SubjectInput, ClientPricing } from "@/lib/nesting";
+import type { NestingResult, SubjectInput, ClientPricing, SubjectType } from "@/lib/nesting";
 import { formatCurrency, getSubjectName, getSubjectColor } from "@/lib/utils";
 import { extractProportions } from "@/lib/extract-proportions";
 import type { FileProportions } from "@/lib/extract-proportions";
@@ -11,6 +11,7 @@ import type { FileProportions } from "@/lib/extract-proportions";
 
 interface SubjectForm {
   name: string;
+  type: SubjectType;
   width: string;
   height: string;
   quantity: string;
@@ -38,6 +39,7 @@ const MAX_FILE_SIZE_MB = 20;
 function emptySubject(index: number): SubjectForm {
   return {
     name: getSubjectName(index),
+    type: "single",
     width: "", height: "", quantity: "",
     file: null,
     ratio: null, lockRatio: false,
@@ -54,10 +56,14 @@ function validateSubjects(subjects: SubjectForm[]): string | null {
     const w = parseFloat(s.width);
     const h = parseFloat(s.height);
     const q = parseInt(s.quantity);
-    if (!s.width || isNaN(w) || w <= 0) return `${s.name}: larghezza non valida`;
+    if (!s.width || isNaN(w) || w <= 0)  return `${s.name}: larghezza non valida`;
     if (!s.height || isNaN(h) || h <= 0) return `${s.name}: altezza non valida`;
     if (!s.quantity || isNaN(q) || q < 1) return `${s.name}: quantità non valida`;
-    if (w > 57 || h > 57) return `${s.name}: dimensione massima 57 cm`;
+    // Width must always fit within the roll
+    if (w > 57) return `${s.name}: larghezza massima 57 cm`;
+    // For precomposed files the height can be up to 300 cm; for single logos both dims ≤ 57 cm
+    if (s.type === "single"      && h > 57)  return `${s.name}: altezza massima 57 cm (logo singolo)`;
+    if (s.type === "precomposed" && h > 300) return `${s.name}: altezza massima 300 cm (file impaginato)`;
   }
   return null;
 }
@@ -214,7 +220,7 @@ export default function QuotingApp({ clientCode, clientName, pricing, onLogout }
       setError(`Carica il file grafica per: ${missingFiles.join(", ")}`);
       return;
     }
-    const inputs: SubjectInput[] = subjects.map(s => ({ name: s.name, width: parseFloat(s.width), height: parseFloat(s.height), quantity: parseInt(s.quantity) }));
+    const inputs: SubjectInput[] = subjects.map(s => ({ name: s.name, type: s.type, width: parseFloat(s.width), height: parseFloat(s.height), quantity: parseInt(s.quantity) }));
     setQuote(calculateNesting(inputs, pricing, includeCut, includeShipping, isIslands));
     setStep(2);
   };
@@ -222,7 +228,7 @@ export default function QuotingApp({ clientCode, clientName, pricing, onLogout }
   // ── Step 2 recalculate ───────────────────────────────────────────────────
 
   const recalculate = useCallback((cut: boolean, shipping: boolean, islands: boolean) => {
-    const inputs: SubjectInput[] = subjects.map(s => ({ name: s.name, width: parseFloat(s.width), height: parseFloat(s.height), quantity: parseInt(s.quantity) }));
+    const inputs: SubjectInput[] = subjects.map(s => ({ name: s.name, type: s.type, width: parseFloat(s.width), height: parseFloat(s.height), quantity: parseInt(s.quantity) }));
     setQuote(calculateNesting(inputs, pricing, cut, shipping, islands));
   }, [subjects, pricing]);
 
@@ -236,7 +242,7 @@ export default function QuotingApp({ clientCode, clientName, pricing, onLogout }
     setSubmitting(true);
     setError(null);
     try {
-      const inputs: SubjectInput[] = subjects.map(s => ({ name: s.name, width: parseFloat(s.width), height: parseFloat(s.height), quantity: parseInt(s.quantity) }));
+      const inputs: SubjectInput[] = subjects.map(s => ({ name: s.name, type: s.type, width: parseFloat(s.width), height: parseFloat(s.height), quantity: parseInt(s.quantity) }));
       const payload = {
         companyName: clientName ?? clientCode ?? "",
         clientCode: clientCode ?? null,
@@ -275,6 +281,11 @@ export default function QuotingApp({ clientCode, clientName, pricing, onLogout }
     setCompanyName("");
     setError(null);
   };
+
+  // ── Derived state ────────────────────────────────────────────────────────
+
+  // Cut option is unavailable when any subject is a precomposed file
+  const hasPrecomposed = subjects.some(s => s.type === "precomposed");
 
   // ── Progress bar helpers ─────────────────────────────────────────────────
 
@@ -352,6 +363,23 @@ export default function QuotingApp({ clientCode, clientName, pricing, onLogout }
                       <div className="flex items-center gap-2 flex-wrap">
                         <span className="w-3 h-3 rounded-full" style={{ backgroundColor: getSubjectColor(i) }} />
                         <span className="font-semibold text-gray-800">{s.name}</span>
+                        {/* Type selector */}
+                        <div className="flex rounded-md border border-gray-300 overflow-hidden text-xs">
+                          <button
+                            type="button"
+                            onClick={() => patchSubject(i, { type: "single" })}
+                            className={`px-2.5 py-1 font-medium transition-colors ${s.type === "single" ? "bg-blue-600 text-white" : "bg-white text-gray-600 hover:bg-gray-50"}`}
+                          >
+                            Logo singolo
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => patchSubject(i, { type: "precomposed" })}
+                            className={`px-2.5 py-1 font-medium border-l border-gray-300 transition-colors ${s.type === "precomposed" ? "bg-blue-600 text-white" : "bg-white text-gray-600 hover:bg-gray-50"}`}
+                          >
+                            File già impaginato
+                          </button>
+                        </div>
                         {s.extracting && <span className="text-xs text-blue-500 animate-pulse">Lettura file…</span>}
                         {!s.extracting && s.proportionSource === "absolute" && (
                           <span className="text-xs text-green-600 bg-green-50 border border-green-200 px-1.5 py-0.5 rounded">✓ Dimensioni rilevate dal file</span>
@@ -381,11 +409,21 @@ export default function QuotingApp({ clientCode, clientName, pricing, onLogout }
                         ) : <div className="w-7 h-7" />}
                       </div>
                       <div>
-                        <label className="block text-xs font-medium text-gray-600 mb-1">Altezza (cm)</label>
-                        <input type="number" min="1" max="200" step="0.1" value={s.height} onChange={e => handleHeightChange(i, e.target.value)} placeholder="es. 30" className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                        <label className="block text-xs font-medium text-gray-600 mb-1">
+                          Altezza (cm)
+                          {s.type === "precomposed" && <span className="text-gray-400 font-normal"> max 300</span>}
+                        </label>
+                        <input
+                          type="number" min="1" max={s.type === "precomposed" ? 300 : 57} step="0.1"
+                          value={s.height} onChange={e => handleHeightChange(i, e.target.value)}
+                          placeholder={s.type === "precomposed" ? "es. 100" : "es. 30"}
+                          className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                        />
                       </div>
                       <div>
-                        <label className="block text-xs font-medium text-gray-600 mb-1">Quantità (pz)</label>
+                        <label className="block text-xs font-medium text-gray-600 mb-1">
+                          {s.type === "precomposed" ? "N° copie" : "Quantità (pz)"}
+                        </label>
                         <input type="number" min="1" step="1" value={s.quantity} onChange={e => patchSubject(i, { quantity: e.target.value })} placeholder="es. 50" className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
                       </div>
                       <div>
@@ -398,6 +436,12 @@ export default function QuotingApp({ clientCode, clientName, pricing, onLogout }
                         <p className="text-xs text-gray-400 mt-1">PDF, AI, SVG, PNG, JPG… max 20MB</p>
                       </div>
                     </div>
+                    {/* Info: file già impaginato */}
+                    {s.type === "precomposed" && (
+                      <p className="mt-2 text-xs text-blue-700 bg-blue-50 border border-blue-200 rounded px-2 py-1">
+                        ℹ️ <strong>File già impaginato:</strong> inserisci le dimensioni dell'intero file e quante copie ti servono. Il taglio non sarà disponibile.
+                      </p>
+                    )}
                     {/* Messaggio: inserisci una dimensione */}
                     {!s.extracting && s.proportionSource === "proportional" && s.ratio !== null && !s.width && !s.height && (
                       <p className="mt-2 text-xs text-blue-600">Inserisci larghezza o altezza — l'altra verrà calcolata automaticamente</p>
@@ -444,8 +488,16 @@ export default function QuotingApp({ clientCode, clientName, pricing, onLogout }
                   <p className="text-sm font-medium text-gray-700 mb-2">Tipo fornitura</p>
                   <div className="flex gap-2">
                     <button onClick={() => handleCutChange(false)} className={`flex-1 py-2 px-3 rounded-lg border text-sm font-medium transition-colors ${!includeCut ? "bg-blue-600 text-white border-blue-600" : "bg-white text-gray-700 border-gray-300 hover:border-gray-400"}`}>Rullo intero</button>
-                    <button onClick={() => handleCutChange(true)} className={`flex-1 py-2 px-3 rounded-lg border text-sm font-medium transition-colors ${includeCut ? "bg-blue-600 text-white border-blue-600" : "bg-white text-gray-700 border-gray-300 hover:border-gray-400"}`}>Pre-tagliati (+€0,10/pz)</button>
+                    <button
+                      onClick={() => !hasPrecomposed && handleCutChange(true)}
+                      disabled={hasPrecomposed}
+                      title={hasPrecomposed ? "Non disponibile per file già impaginati" : undefined}
+                      className={`flex-1 py-2 px-3 rounded-lg border text-sm font-medium transition-colors ${includeCut && !hasPrecomposed ? "bg-blue-600 text-white border-blue-600" : hasPrecomposed ? "bg-gray-100 text-gray-400 border-gray-200 cursor-not-allowed" : "bg-white text-gray-700 border-gray-300 hover:border-gray-400"}`}
+                    >Pre-tagliati (+€0,10/pz)</button>
                   </div>
+                  {hasPrecomposed && (
+                    <p className="text-xs text-gray-500 mt-1.5">Il taglio non è disponibile per file già impaginati</p>
+                  )}
                 </div>
                 <div>
                   <p className="text-sm font-medium text-gray-700 mb-2">Consegna</p>

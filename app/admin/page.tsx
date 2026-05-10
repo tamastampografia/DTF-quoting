@@ -82,8 +82,8 @@ export default function AdminPage() {
     setAuthLoading(true);
     setAuthError("");
     try {
-      // Validate against server before granting access
-      const res = await fetch("/api/orders", { headers: { "x-admin-password": adminPwRef.current } });
+      // Validate against server before granting access (use typed password, not ref)
+      const res = await fetch("/api/orders", { headers: { "x-admin-password": password } });
       if (res.status === 401) {
         setAuthError("Password non valida");
         setAuthLoading(false);

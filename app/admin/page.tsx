@@ -45,6 +45,9 @@ export default function AdminPage() {
   const [authenticated, setAuthenticated] = useState(false);
   const [password, setPassword] = useState("");
   const [authError, setAuthError] = useState("");
+  const [authLoading, setAuthLoading] = useState(false);
+  // Stable ref so loadOrders/loadClients always use the correct password
+  const adminPwRef = React.useRef<string>("");
   const [tab, setTab] = useState<AdminTab>("orders");
 
   // Orders
@@ -74,23 +77,33 @@ export default function AdminPage() {
 
   // ── Auth ────────────────────────────────────────────────────────────────
 
-  const handleLogin = (e: React.FormEvent) => {
+  const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
-    // Client-side check only; server APIs re-validate
-    if (password === "stampoo2025" || password.length >= 6) {
+    setAuthLoading(true);
+    setAuthError("");
+    try {
+      // Validate against server before granting access
+      const res = await fetch("/api/orders", { headers: { "x-admin-password": adminPwRef.current } });
+      if (res.status === 401) {
+        setAuthError("Password non valida");
+        setAuthLoading(false);
+        return;
+      }
+      const data = await res.json();
+      adminPwRef.current = password;
       setAuthenticated(true);
-      setAuthError("");
-      loadOrders(password);
+      if (data.orders) setOrders(data.orders);
       loadClients(password);
-    } else {
-      setAuthError("Password non valida");
+    } catch {
+      setAuthError("Errore di connessione. Riprova.");
     }
+    setAuthLoading(false);
   };
 
   // ── Orders ──────────────────────────────────────────────────────────────
 
   const loadOrders = async (pwd?: string) => {
-    const p = pwd ?? password;
+    const p = pwd ?? adminPwRef.current;
     setOrdersLoading(true);
     try {
       const res = await fetch("/api/orders", { headers: { "x-admin-password": p } });
@@ -103,7 +116,7 @@ export default function AdminPage() {
   // ── Clients ─────────────────────────────────────────────────────────────
 
   const loadClients = async (pwd?: string) => {
-    const p = pwd ?? password;
+    const p = pwd ?? adminPwRef.current;
     setClientsLoading(true);
     try {
       const res = await fetch("/api/clients", { headers: { "x-admin-password": p } });
@@ -132,7 +145,7 @@ export default function AdminPage() {
     try {
       const res = await fetch("/api/clients", {
         method: "POST",
-        headers: { "content-type": "application/json", "x-admin-password": password },
+        headers: { "content-type": "application/json", "x-admin-password": adminPwRef.current },
         body: JSON.stringify({
           code: generateClientCode(),
           name: newClient.name.trim(),
@@ -183,7 +196,7 @@ export default function AdminPage() {
 
       const res = await fetch("/api/clients", {
         method: "PATCH",
-        headers: { "content-type": "application/json", "x-admin-password": password },
+        headers: { "content-type": "application/json", "x-admin-password": adminPwRef.current },
         body: JSON.stringify(body),
       });
       const data = await res.json();
@@ -199,7 +212,7 @@ export default function AdminPage() {
 
   const handleDeleteClient = async (id: string) => {
     if (!confirm("Eliminare questo cliente?")) return;
-    await fetch(`/api/clients?id=${id}`, { method: "DELETE", headers: { "x-admin-password": password } });
+    await fetch(`/api/clients?id=${id}`, { method: "DELETE", headers: { "x-admin-password": adminPwRef.current } });
     loadClients();
   };
 
@@ -238,8 +251,8 @@ export default function AdminPage() {
               />
             </div>
             {authError && <p className="text-red-500 text-sm">{authError}</p>}
-            <button type="submit" className="w-full bg-blue-600 text-white font-semibold py-2.5 rounded-lg hover:bg-blue-700 transition-colors">
-              Accedi
+            <button type="submit" disabled={authLoading} className="w-full bg-blue-600 text-white font-semibold py-2.5 rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-60">
+              {authLoading ? "Verifica…" : "Accedi"}
             </button>
           </form>
         </div>

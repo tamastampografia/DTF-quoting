@@ -258,7 +258,7 @@ export default function QuotingApp({ clientCode, clientName, pricing, onLogout }
       };
       const formData = new FormData();
       formData.append("payload", JSON.stringify(payload));
-      subjects.forEach((s, i) => { if (s.file) formData.append(`file_${i}`, s.file); });
+      // File contents not uploaded (server lists names only) — avoids Netlify 10MB body limit
 
       const res = await fetch("/api/send-order", { method: "POST", body: formData });
       if (!res.ok) {

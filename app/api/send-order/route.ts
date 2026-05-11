@@ -15,38 +15,15 @@ export async function POST(req: NextRequest) {
 
     const payload = JSON.parse(payloadStr);
 
-    // Collect files
-    const fileAttachments: { filename: string; content: string; contentType: string }[] = [];
+    // Collect file names only — no base64 encoding to avoid timeout
+    const fileNames: string[] = [];
     formData.forEach((value, key) => {
       if (key.startsWith("file_") && value instanceof File) {
-        // We'll handle files as base64
-        fileAttachments.push({
-          filename: value.name,
-          content: "", // filled below
-          contentType: value.type || "application/octet-stream",
-        });
+        fileNames.push(value.name);
       }
     });
 
-    // Re-iterate to get file contents (can't use for..of on FormData)
-    const filePromises: Promise<void>[] = [];
-    let fileIdx = 0;
-    formData.forEach((value, key) => {
-      if (key.startsWith("file_") && value instanceof File) {
-        const idx = fileIdx++;
-        const file = value as File;
-        filePromises.push(
-          file.arrayBuffer().then(buf => {
-            fileAttachments[idx].content = Buffer.from(buf).toString("base64");
-            fileAttachments[idx].filename = file.name;
-            fileAttachments[idx].contentType = file.type || "application/octet-stream";
-          })
-        );
-      }
-    });
-    await Promise.all(filePromises);
-
-    // 1. Save to Supabase
+    // 1. Save to Supabase — always, before attempting email
     const supabase = getServiceClient();
     let orderId: string | null = null;
     if (supabase) {
@@ -55,36 +32,41 @@ export async function POST(req: NextRequest) {
         .insert({ payload })
         .select("id")
         .single();
+      if (error) console.error("[send-order] Supabase error:", error.message);
       if (!error && data) orderId = data.id;
     } else {
-      console.log("[send-order] Supabase not configured, skipping DB save");
-      console.log("[send-order] Payload:", JSON.stringify(payload, null, 2));
+      console.log("[send-order] Supabase not configured");
     }
 
-    // 2. Send email via Resend
+    // 2. Send email via Resend (no file attachments — filenames listed in body)
     const resendKey = process.env.RESEND_API_KEY;
     const orderEmails = (process.env.ORDER_EMAIL || "edoardo.modini@tamas.it")
       .split(",").map(e => e.trim()).filter(Boolean);
     const fromEmail = process.env.RESEND_FROM_EMAIL || "STAMPOO DTF <onboarding@resend.dev>";
 
     if (resendKey) {
-      const resend = new Resend(resendKey);
+      try {
+        const resend = new Resend(resendKey);
 
-      const subjectsRows = payload.subjects
-        .map((s: any, i: number) => {
-          const sr = payload.quote?.subjects?.[i];
-          return `
-            <tr>
-              <td style="padding:6px 10px;border-bottom:1px solid #eee;">${escapeHtml(s.name)}</td>
-              <td style="padding:6px 10px;border-bottom:1px solid #eee;">${s.width} &times; ${s.height} cm</td>
-              <td style="padding:6px 10px;border-bottom:1px solid #eee;">${s.quantity} pz</td>
-              <td style="padding:6px 10px;border-bottom:1px solid #eee;">${sr ? formatCurrency(sr.pricePerPiece) : "-"}</td>
-              <td style="padding:6px 10px;border-bottom:1px solid #eee;">${sr ? formatCurrency(sr.totalPrice) : "-"}</td>
-            </tr>`;
-        })
-        .join("");
+        const subjectsRows = payload.subjects
+          .map((s: any, i: number) => {
+            const sr = payload.quote?.subjects?.[i];
+            return `
+              <tr>
+                <td style="padding:6px 10px;border-bottom:1px solid #eee;">${escapeHtml(s.name)}</td>
+                <td style="padding:6px 10px;border-bottom:1px solid #eee;">${s.width} &times; ${s.height} cm</td>
+                <td style="padding:6px 10px;border-bottom:1px solid #eee;">${s.quantity} pz</td>
+                <td style="padding:6px 10px;border-bottom:1px solid #eee;">${sr ? formatCurrency(sr.pricePerPiece) : "-"}</td>
+                <td style="padding:6px 10px;border-bottom:1px solid #eee;">${sr ? formatCurrency(sr.totalPrice) : "-"}</td>
+              </tr>`;
+          })
+          .join("");
 
-      const html = `
+        const filesHtml = fileNames.length > 0
+          ? `<ul style="margin:4px 0;padding-left:20px;">${fileNames.map(n => `<li>${escapeHtml(n)}</li>`).join("")}</ul>`
+          : "<p style='color:#888;'>Nessun file allegato</p>";
+
+        const html = `
 <!DOCTYPE html>
 <html>
 <head><meta charset="utf-8"><title>Nuovo ordine DTF</title></head>
@@ -129,8 +111,10 @@ export async function POST(req: NextRequest) {
     </tr>
   </table>
 
+  <h2 style="margin-top:24px;">File grafici (${fileNames.length})</h2>
+  ${filesHtml}
+
   <p style="margin-top:24px;font-size:13px;color:#666;">
-    File grafici allegati: ${payload.files?.length ?? 0}<br>
     ID ordine: ${orderId ?? "non salvato"}<br>
     Data: ${new Date(payload.createdAt).toLocaleString("it-IT")}
   </p>
@@ -142,22 +126,16 @@ export async function POST(req: NextRequest) {
 </body>
 </html>`;
 
-      const attachments = fileAttachments
-        .filter(f => f.content.length > 0)
-        .map(f => ({
-          filename: f.filename,
-          content: f.content,
-        }));
-
-      await resend.emails.send({
-        from: fromEmail,
-        to: orderEmails,
-        subject: `Nuovo ordine DTF - ${escapeHtml(payload.companyName)} - ${formatCurrency(payload.quote?.grandTotal ?? 0)}`,
-        html,
-        attachments,
-      });
-    } else {
-      console.log("[send-order] Resend not configured, skipping email");
+        await resend.emails.send({
+          from: fromEmail,
+          to: orderEmails,
+          subject: `Nuovo ordine DTF - ${escapeHtml(payload.companyName)} - ${formatCurrency(payload.quote?.grandTotal ?? 0)}`,
+          html,
+        });
+      } catch (emailErr: any) {
+        // Email failure must not block the order — log and continue
+        console.error("[send-order] Email error:", emailErr?.message);
+      }
     }
 
     return NextResponse.json({ success: true, orderId });

@@ -261,7 +261,11 @@ export default function QuotingApp({ clientCode, clientName, pricing, onLogout }
       subjects.forEach((s, i) => { if (s.file) formData.append(`file_${i}`, s.file); });
 
       const res = await fetch("/api/send-order", { method: "POST", body: formData });
-      if (!res.ok) { const d = await res.json(); throw new Error(d.error ?? "Errore nell'invio"); }
+      if (!res.ok) {
+        let msg = "Errore nell'invio";
+        try { const d = await res.json(); msg = d.error ?? msg; } catch {}
+        throw new Error(msg);
+      }
 
       setStep("confirmed");
     } catch (err: any) {
